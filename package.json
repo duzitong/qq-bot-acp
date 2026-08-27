@@ -1,0 +1,36 @@
+{
+  "name": "qq-bot-acp",
+  "version": "0.1.0",
+  "description": "Bridge QQ Bot messages to arbitrary ACP-compatible agents",
+  "type": "module",
+  "bin": {
+    "qq-bot-acp": "./dist/bin/qq-bot-acp.js"
+  },
+  "main": "./dist/src/index.js",
+  "types": "./dist/src/index.d.ts",
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/bin/qq-bot-acp.js",
+    "test": "node --import tsx/esm --test tests/**/*.test.ts"
+  },
+  "dependencies": {
+    "@agentclientprotocol/sdk": "^0.16.1",
+    "ws": "^8.18.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/ws": "^8.5.0",
+    "tsx": "^4.22.3",
+    "typescript": "^5.5.0"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "license": "MIT"
+}
