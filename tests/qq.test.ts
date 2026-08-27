@@ -5,10 +5,9 @@ import {
   buildTextMessageBody,
   type QQSendTextInput,
 } from "../src/qq/api.js";
+import { QQSender } from "../src/qq/sender.js";
 import {
-  QQSender,
-} from "../src/qq/sender.js";
-import {
+  renderLatexForQQ,
   renderMarkdownForQQ,
   splitText,
 } from "../src/qq/format.js";
@@ -54,6 +53,38 @@ test("Markdown is rendered as readable QQ plain text", () => {
   );
 });
 
+test("LaTeX formulas are rendered as readable QQ text", () => {
+  const formula = String.raw`\[
+match(x,g)=\text{x与猜测g在相同位置上数字相同的个数}
+\]`;
+
+  assert.equal(
+    renderMarkdownForQQ(formula),
+    [
+      "[Formula]",
+      "match(x, g) = x与猜测g在相同位置上数字相同的个数",
+    ].join("\n"),
+  );
+  assert.equal(
+    renderMarkdownForQQ(
+      String.raw`Score \(x_i \geq \frac{1}{2}\); area is $r^2 \times \pi$.`,
+    ),
+    "Score xᵢ ≥ 1 / 2; area is r² × π.",
+  );
+  assert.equal(
+    renderLatexForQQ(String.raw`\sqrt{x^2 + y^2} \approx 1`),
+    "√(x² + y²) ≈ 1",
+  );
+  assert.equal(
+    renderMarkdownForQQ("Tickets cost $5 and $10."),
+    "Tickets cost $5 and $10.",
+  );
+  assert.equal(
+    renderMarkdownForQQ("Use `\\[x^2\\]` literally."),
+    "Use [\\[x^2\\]] literally.",
+  );
+});
+
 test("agent output streams at complete Markdown blocks", async () => {
   const { sender, sent } = senderFixture({
     textChunkLimit: 200,
@@ -80,6 +111,23 @@ test("agent output streams at complete Markdown blocks", async () => {
       { sequence: 2, text: "Final answer.", markdown: false },
     ],
   );
+});
+
+test("streaming keeps a display LaTeX formula together", async () => {
+  const { sender, sent } = senderFixture({
+    textChunkLimit: 200,
+    streamMinChars: 100,
+  });
+  const reply = sender.createReply(inboundMessage());
+
+  await reply.write(`\\[\n${"x+".repeat(55)}\n`);
+  assert.equal(sent.length, 0);
+
+  await reply.write("\\]\n\n");
+  assert.equal(sent.length, 1);
+  assert.match(sent[0]!.text, /^\[Formula\]\nx\+/);
+  await reply.finish();
+  assert.equal(sent.length, 1);
 });
 
 test("QQ passive replies are capped and visibly truncated", async () => {

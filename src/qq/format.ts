@@ -2,6 +2,7 @@ export function renderMarkdownForQQ(markdown: string): string {
   const lines = markdown.replace(/\r\n?/g, "\n").trim().split("\n");
   const rendered: string[] = [];
   let fence: { marker: string; length: number } | undefined;
+  let displayMath: { close: "\\]" | "$$"; lines: string[] } | undefined;
   let inTable = false;
 
   for (let index = 0; index < lines.length; index++) {
@@ -25,6 +26,27 @@ export function renderMarkdownForQQ(markdown: string): string {
     }
     if (fence) {
       rendered.push(line ? `  ${line}` : "");
+      continue;
+    }
+
+    if (displayMath) {
+      if (line.trim() === displayMath.close) {
+        rendered.push("[Formula]", renderLatexForQQ(displayMath.lines.join("\n")));
+        displayMath = undefined;
+      } else {
+        displayMath.lines.push(line);
+      }
+      continue;
+    }
+
+    const completeFormula = readCompleteDisplayFormula(line);
+    if (completeFormula !== undefined) {
+      rendered.push("[Formula]", renderLatexForQQ(completeFormula));
+      continue;
+    }
+    const formulaClose = displayFormulaClose(line);
+    if (formulaClose) {
+      displayMath = { close: formulaClose, lines: [] };
       continue;
     }
 
@@ -67,6 +89,10 @@ export function renderMarkdownForQQ(markdown: string): string {
     rendered.push(renderInlineMarkdown(line).trimEnd());
   }
 
+  if (displayMath) {
+    rendered.push("[Formula]", renderLatexForQQ(displayMath.lines.join("\n")));
+  }
+
   return rendered.join("\n").replace(/\n{3,}/g, "\n\n").trim();
 }
 
@@ -76,13 +102,13 @@ export function findStreamingSplit(
   maximum: number,
 ): number | undefined {
   if (minimum > maximum || text.length < minimum) return undefined;
-  const { blockBreaks, lineBreaks, inFenceAtMaximum } =
+  const { blockBreaks, lineBreaks, inProtectedBlockAtMaximum } =
     markdownBreaks(text, maximum);
   const blockBreak = blockBreaks.find(
     (position) => position >= minimum && position <= maximum,
   );
   if (blockBreak !== undefined) return blockBreak;
-  if (text.length < maximum || inFenceAtMaximum) return undefined;
+  if (text.length < maximum || inProtectedBlockAtMaximum) return undefined;
 
   const lineBreak = lineBreaks
     .filter((position) => position >= minimum && position <= maximum)
@@ -136,14 +162,30 @@ export function splitText(text: string, limit: number): string[] {
   return chunks;
 }
 
+export function renderLatexForQQ(latex: string): string {
+  return normalizeMathText(parseLatex(latex, 0).value);
+}
+
 function renderInlineMarkdown(text: string): string {
   const codeSpans: string[] = [];
+  const mathSpans: string[] = [];
   let rendered = text.replace(/(`+)(.+?)\1/g, (_match, _ticks, code: string) => {
     const index = codeSpans.push(code) - 1;
     return `\u0000CODE${index}\u0000`;
   });
 
   rendered = rendered
+    .replace(/\\\((.+?)\\\)/g, (_match, formula: string) => {
+      const index = mathSpans.push(renderLatexForQQ(formula)) - 1;
+      return `\u0000MATH${index}\u0000`;
+    })
+    .replace(
+      /(?<![\\$])\$(?![$\s])(\S(?:[^$\n]*?\S)?)(?<!\\)\$(?![$\d])/g,
+      (_match, formula: string) => {
+        const index = mathSpans.push(renderLatexForQQ(formula)) - 1;
+        return `\u0000MATH${index}\u0000`;
+      },
+    )
     .replace(
       /!\[([^\]]*)\]\((\S+?)(?:\s+["'][^"']*["'])?\)/g,
       (_match, alt: string, url: string) =>
@@ -157,11 +199,461 @@ function renderInlineMarkdown(text: string): string {
     .replace(/__(\S(?:.*?\S)?)__/g, "$1")
     .replace(/~~(\S(?:.*?\S)?)~~/g, "$1")
     .replace(/\*(\S(?:.*?\S)?)\*/g, "$1")
-    .replace(/_(\S(?:.*?\S)?)_/g, "$1");
+    .replace(/_(\S(?:.*?\S)?)_/g, "$1")
+    .replace(/\u0000MATH(\d+)\u0000/g, (_match, index: string) =>
+      mathSpans[Number(index)] ?? "")
+    .replace(/\\\$/g, "$");
 
   return rendered.replace(/\u0000CODE(\d+)\u0000/g, (_match, index: string) =>
     `[${codeSpans[Number(index)] ?? ""}]`);
 }
+
+interface LatexParseResult {
+  value: string;
+  index: number;
+}
+
+function parseLatex(
+  source: string,
+  start: number,
+  terminator?: string,
+): LatexParseResult {
+  let value = "";
+  let index = start;
+
+  while (index < source.length) {
+    const character = source[index]!;
+    if (terminator && character === terminator) {
+      return { value, index: index + 1 };
+    }
+    if (character === "\\") {
+      const command = parseLatexCommand(source, index);
+      value += command.value;
+      index = command.index;
+      continue;
+    }
+    if (character === "{") {
+      const group = parseLatex(source, index + 1, "}");
+      value += group.value;
+      index = group.index;
+      continue;
+    }
+    if (character === "^" || character === "_") {
+      const argument = parseLatexArgument(source, index + 1);
+      value += renderMathScript(argument.value, character);
+      index = argument.index;
+      continue;
+    }
+    if (character === "~") {
+      value += " ";
+    } else if (character === "&") {
+      value += " ";
+    } else {
+      value += character;
+    }
+    index++;
+  }
+
+  return { value, index };
+}
+
+function parseLatexCommand(source: string, slashIndex: number): LatexParseResult {
+  const first = source[slashIndex + 1];
+  if (!first) return { value: "", index: slashIndex + 1 };
+  if (!/[A-Za-z]/.test(first)) {
+    return {
+      value: LATEX_ESCAPES[first] ?? first,
+      index: slashIndex + 2,
+    };
+  }
+
+  let index = slashIndex + 2;
+  while (index < source.length && /[A-Za-z]/.test(source[index]!)) index++;
+  const command = source.slice(slashIndex + 1, index);
+
+  if (TEXT_COMMANDS.has(command)) {
+    return parseLatexArgument(source, index);
+  }
+  if (command === "frac" || command === "dfrac" || command === "tfrac") {
+    const numerator = parseLatexArgument(source, index);
+    const denominator = parseLatexArgument(source, numerator.index);
+    return {
+      value: `${wrapMathPart(numerator.value)} / ${wrapMathPart(denominator.value)}`,
+      index: denominator.index,
+    };
+  }
+  if (command === "sqrt") {
+    const rootIndex = parseOptionalRootIndex(source, index);
+    const radicand = parseLatexArgument(source, rootIndex.index);
+    const radical =
+      rootIndex.value === "3"
+        ? "∛"
+        : rootIndex.value === "4"
+          ? "∜"
+          : rootIndex.value
+            ? `root[${rootIndex.value}]`
+            : "√";
+    return {
+      value: `${radical}${wrapRadicand(radicand.value)}`,
+      index: radicand.index,
+    };
+  }
+  if (ACCENT_COMMANDS[command]) {
+    const argument = parseLatexArgument(source, index);
+    return {
+      value: `${argument.value}${ACCENT_COMMANDS[command]}`,
+      index: argument.index,
+    };
+  }
+  if (command === "begin" || command === "end") {
+    const environment = parseLatexArgument(source, index);
+    return { value: "", index: environment.index };
+  }
+  if (DELIMITER_COMMANDS.has(command)) {
+    return { value: "", index };
+  }
+
+  return {
+    value: LATEX_SYMBOLS[command] ?? command,
+    index,
+  };
+}
+
+function parseLatexArgument(source: string, start: number): LatexParseResult {
+  let index = start;
+  while (index < source.length && /\s/.test(source[index]!)) index++;
+  if (source[index] === "{") return parseLatex(source, index + 1, "}");
+  if (source[index] === "\\") return parseLatexCommand(source, index);
+  const character = source.codePointAt(index);
+  if (character === undefined) return { value: "", index };
+  const value = String.fromCodePoint(character);
+  return { value, index: index + value.length };
+}
+
+function parseOptionalRootIndex(
+  source: string,
+  start: number,
+): LatexParseResult {
+  let index = start;
+  while (index < source.length && /\s/.test(source[index]!)) index++;
+  if (source[index] !== "[") return { value: "", index };
+  const end = source.indexOf("]", index + 1);
+  if (end === -1) return { value: "", index };
+  return {
+    value: renderLatexForQQ(source.slice(index + 1, end)),
+    index: end + 1,
+  };
+}
+
+function renderMathScript(value: string, marker: "^" | "_"): string {
+  const map = marker === "^" ? SUPERSCRIPT : SUBSCRIPT;
+  const converted = [...value].map((character) => map[character]);
+  if (converted.every((character) => character !== undefined)) {
+    return converted.join("");
+  }
+  return marker === "^" ? `^(${value})` : `_(${value})`;
+}
+
+function wrapMathPart(value: string): string {
+  const trimmed = value.trim();
+  return isSimpleMathPart(trimmed) ? trimmed : `(${trimmed})`;
+}
+
+function wrapRadicand(value: string): string {
+  const trimmed = value.trim();
+  return isSimpleMathPart(trimmed) ? trimmed : `(${trimmed})`;
+}
+
+function isSimpleMathPart(value: string): boolean {
+  return /^[\p{L}\p{N}⁰¹²³⁴⁵⁶⁷⁸⁹₀₁₂₃₄₅₆₇₈₉]+$/u.test(value);
+}
+
+function normalizeMathText(value: string): string {
+  return value
+    .replace(/[ \t]+/g, " ")
+    .replace(/ *\n */g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .replace(/\s*([=≠≈≃≡≤≥∈∉⊂⊆⊃⊇→←↔⇒⇔])\s*/g, " $1 ")
+    .replace(/,\s*/g, ", ")
+    .replace(/\(\s+/g, "(")
+    .replace(/\s+\)/g, ")")
+    .replace(/[ \t]{2,}/g, " ")
+    .trim();
+}
+
+function readCompleteDisplayFormula(line: string): string | undefined {
+  const trimmed = line.trim();
+  const bracketed = trimmed.match(/^\\\[(.*)\\\]$/);
+  if (bracketed) return bracketed[1]!;
+  const dollarDelimited = trimmed.match(/^\$\$(.*)\$\$$/);
+  return dollarDelimited?.[1];
+}
+
+function displayFormulaClose(line: string): "\\]" | "$$" | undefined {
+  const trimmed = line.trim();
+  if (trimmed === "\\[") return "\\]";
+  if (trimmed === "$$") return "$$";
+  return undefined;
+}
+
+const TEXT_COMMANDS = new Set([
+  "text",
+  "textrm",
+  "textsf",
+  "texttt",
+  "mathrm",
+  "mathbf",
+  "mathit",
+  "mathsf",
+  "mathtt",
+  "operatorname",
+  "overline",
+  "underline",
+]);
+
+const DELIMITER_COMMANDS = new Set([
+  "left",
+  "right",
+  "big",
+  "Big",
+  "bigg",
+  "Bigg",
+  "bigl",
+  "bigr",
+  "Bigl",
+  "Bigr",
+  "biggl",
+  "biggr",
+  "Biggl",
+  "Biggr",
+]);
+
+const LATEX_ESCAPES: Readonly<Record<string, string>> = {
+  "\\": "\n",
+  ",": " ",
+  ":": " ",
+  ";": " ",
+  "!": "",
+  " ": " ",
+  "{": "{",
+  "}": "}",
+  "_": "_",
+  "%": "%",
+  "$": "$",
+  "#": "#",
+  "&": "&",
+  "|": "‖",
+};
+
+const ACCENT_COMMANDS: Readonly<Record<string, string>> = {
+  bar: "\u0304",
+  dot: "\u0307",
+  hat: "\u0302",
+  tilde: "\u0303",
+  vec: "\u20d7",
+};
+
+const LATEX_SYMBOLS: Readonly<Record<string, string>> = {
+  alpha: "α",
+  beta: "β",
+  gamma: "γ",
+  delta: "δ",
+  epsilon: "ε",
+  varepsilon: "ϵ",
+  zeta: "ζ",
+  eta: "η",
+  theta: "θ",
+  vartheta: "ϑ",
+  iota: "ι",
+  kappa: "κ",
+  lambda: "λ",
+  mu: "μ",
+  nu: "ν",
+  xi: "ξ",
+  omicron: "ο",
+  pi: "π",
+  varpi: "ϖ",
+  rho: "ρ",
+  varrho: "ϱ",
+  sigma: "σ",
+  varsigma: "ς",
+  tau: "τ",
+  upsilon: "υ",
+  phi: "φ",
+  varphi: "ϕ",
+  chi: "χ",
+  psi: "ψ",
+  omega: "ω",
+  Gamma: "Γ",
+  Delta: "Δ",
+  Theta: "Θ",
+  Lambda: "Λ",
+  Xi: "Ξ",
+  Pi: "Π",
+  Sigma: "Σ",
+  Upsilon: "Υ",
+  Phi: "Φ",
+  Psi: "Ψ",
+  Omega: "Ω",
+  times: "×",
+  cdot: "·",
+  div: "÷",
+  pm: "±",
+  mp: "∓",
+  ast: "∗",
+  star: "⋆",
+  circ: "∘",
+  bullet: "∙",
+  eq: "=",
+  neq: "≠",
+  ne: "≠",
+  approx: "≈",
+  simeq: "≃",
+  equiv: "≡",
+  le: "≤",
+  leq: "≤",
+  ge: "≥",
+  geq: "≥",
+  ll: "≪",
+  gg: "≫",
+  in: "∈",
+  notin: "∉",
+  ni: "∋",
+  subset: "⊂",
+  subseteq: "⊆",
+  supset: "⊃",
+  supseteq: "⊇",
+  cup: "∪",
+  cap: "∩",
+  emptyset: "∅",
+  varnothing: "∅",
+  infinity: "∞",
+  infty: "∞",
+  sum: "Σ",
+  prod: "Π",
+  int: "∫",
+  iint: "∬",
+  iiint: "∭",
+  partial: "∂",
+  nabla: "∇",
+  forall: "∀",
+  exists: "∃",
+  nexists: "∄",
+  neg: "¬",
+  land: "∧",
+  wedge: "∧",
+  lor: "∨",
+  vee: "∨",
+  therefore: "∴",
+  because: "∵",
+  to: "→",
+  rightarrow: "→",
+  leftarrow: "←",
+  leftrightarrow: "↔",
+  Rightarrow: "⇒",
+  Leftarrow: "⇐",
+  Leftrightarrow: "⇔",
+  mapsto: "↦",
+  ldots: "…",
+  dots: "…",
+  cdots: "⋯",
+  vdots: "⋮",
+  ddots: "⋱",
+  angle: "∠",
+  degree: "°",
+  prime: "′",
+  quad: "  ",
+  qquad: "    ",
+  colon: ":",
+  sin: "sin",
+  cos: "cos",
+  tan: "tan",
+  cot: "cot",
+  sec: "sec",
+  csc: "csc",
+  log: "log",
+  ln: "ln",
+  exp: "exp",
+  lim: "lim",
+  min: "min",
+  max: "max",
+};
+
+const SUPERSCRIPT: Readonly<Record<string, string>> = {
+  "0": "⁰",
+  "1": "¹",
+  "2": "²",
+  "3": "³",
+  "4": "⁴",
+  "5": "⁵",
+  "6": "⁶",
+  "7": "⁷",
+  "8": "⁸",
+  "9": "⁹",
+  "+": "⁺",
+  "-": "⁻",
+  "=": "⁼",
+  "(": "⁽",
+  ")": "⁾",
+  a: "ᵃ",
+  b: "ᵇ",
+  c: "ᶜ",
+  d: "ᵈ",
+  e: "ᵉ",
+  f: "ᶠ",
+  g: "ᵍ",
+  h: "ʰ",
+  i: "ⁱ",
+  j: "ʲ",
+  k: "ᵏ",
+  l: "ˡ",
+  m: "ᵐ",
+  n: "ⁿ",
+  o: "ᵒ",
+  p: "ᵖ",
+  r: "ʳ",
+  s: "ˢ",
+  t: "ᵗ",
+  u: "ᵘ",
+  v: "ᵛ",
+  w: "ʷ",
+  x: "ˣ",
+  y: "ʸ",
+  z: "ᶻ",
+};
+
+const SUBSCRIPT: Readonly<Record<string, string>> = {
+  "0": "₀",
+  "1": "₁",
+  "2": "₂",
+  "3": "₃",
+  "4": "₄",
+  "5": "₅",
+  "6": "₆",
+  "7": "₇",
+  "8": "₈",
+  "9": "₉",
+  "+": "₊",
+  "-": "₋",
+  "=": "₌",
+  "(": "₍",
+  ")": "₎",
+  a: "ₐ",
+  e: "ₑ",
+  h: "ₕ",
+  i: "ᵢ",
+  j: "ⱼ",
+  k: "ₖ",
+  l: "ₗ",
+  m: "ₘ",
+  n: "ₙ",
+  o: "ₒ",
+  p: "ₚ",
+  r: "ᵣ",
+  s: "ₛ",
+  t: "ₜ",
+  x: "ₓ",
+};
 
 function isTableRow(line: string): boolean {
   return line.includes("|") && line.split("|").filter((cell) => cell.trim()).length >= 2;
@@ -189,38 +681,55 @@ function markdownBreaks(
 ): {
   blockBreaks: number[];
   lineBreaks: number[];
-  inFenceAtMaximum: boolean;
+  inProtectedBlockAtMaximum: boolean;
 } {
   const blockBreaks: number[] = [];
   const lineBreaks: number[] = [];
   let fence: { marker: string; length: number } | undefined;
+  let displayMath: "\\]" | "$$" | undefined;
   let offset = 0;
-  let inFenceAtMaximum = false;
+  let inProtectedBlockAtMaximum = false;
 
   for (const part of text.match(/[^\n]*(?:\n|$)/g) ?? []) {
     if (!part) continue;
     const lineStart = offset;
     const line = part.endsWith("\n") ? part.slice(0, -1) : part;
-    const wasInFence = Boolean(fence);
+    const wasProtected = Boolean(fence || displayMath);
     const marker = line.match(/^\s{0,3}(`{3,}|~{3,})/)?.[1];
 
-    if (marker) {
+    if (!displayMath && marker) {
       if (!fence) {
         fence = { marker: marker[0]!, length: marker.length };
       } else if (marker[0] === fence.marker && marker.length >= fence.length) {
         fence = undefined;
       }
     }
+    if (!fence) {
+      if (displayMath && line.trim() === displayMath) {
+        displayMath = undefined;
+      } else if (!displayMath) {
+        displayMath = displayFormulaClose(line);
+      }
+    }
 
     offset += part.length;
     if (lineStart < maximum && offset >= maximum) {
-      inFenceAtMaximum = wasInFence || Boolean(fence);
+      inProtectedBlockAtMaximum =
+        wasProtected || Boolean(fence || displayMath);
     }
-    if (!fence && part.endsWith("\n")) lineBreaks.push(offset);
-    if (!wasInFence && !fence && !line.trim()) blockBreaks.push(offset);
+    if (!fence && !displayMath && part.endsWith("\n")) lineBreaks.push(offset);
     if (
-      !wasInFence &&
+      !wasProtected &&
       !fence &&
+      !displayMath &&
+      !line.trim()
+    ) {
+      blockBreaks.push(offset);
+    }
+    if (
+      !wasProtected &&
+      !fence &&
+      !displayMath &&
       lineStart > 0 &&
       /^\s{0,3}#{1,6}\s+/.test(line)
     ) {
@@ -228,5 +737,5 @@ function markdownBreaks(
     }
   }
 
-  return { blockBreaks, lineBreaks, inFenceAtMaximum };
+  return { blockBreaks, lineBreaks, inProtectedBlockAtMaximum };
 }

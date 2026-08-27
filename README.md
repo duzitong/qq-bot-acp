@@ -145,6 +145,11 @@ approval for passive replies. Approved bots can select native rendering:
 /c output.markdownMode "native"
 ```
 
+In plain mode, LaTeX expressions delimited by `\[ ... \]`, `$$ ... $$`,
+`\(...\)`, or `$...$` are converted to readable Unicode text. Common symbols,
+fractions, roots, superscripts, subscripts, and `\text{...}` content are
+supported; fenced code remains unchanged.
+
 Output behavior can be adjusted from an administrator private chat:
 
 ```text
