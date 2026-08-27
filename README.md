@@ -157,3 +157,19 @@ stdin/stdout.
   to the agent as source URLs.
 - Agent text is split to the configured QQ message limit before delivery.
 - ACP permission requests automatically select an allow option.
+
+## Acknowledgements
+
+This project builds on ideas and implementation patterns from:
+
+- [formulahendry/wechat-acp](https://github.com/formulahendry/wechat-acp),
+  especially its ACP stdio client, per-conversation agent session lifecycle,
+  prompt adaptation, and session configuration handling.
+- [tencent-connect/openclaw-qqbot](https://github.com/tencent-connect/openclaw-qqbot),
+  the official QQ Bot channel plugin for
+  [OpenClaw](https://github.com/openclaw/openclaw), especially its QQ Open
+  Platform authentication, WebSocket gateway, event normalization, reconnect,
+  and outbound messaging patterns.
+
+`qq-bot-acp` combines these approaches into a standalone QQ-to-ACP bridge; it
+does not require the OpenClaw runtime.
