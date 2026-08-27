@@ -69,9 +69,25 @@ export class BotController {
     }
 
     const prompt = await messageToPrompt(message);
+    const reply = this.sender.createReply(message);
+    let thoughtStarted = false;
+    let answerStarted = false;
     await this.sessions.prompt(message.conversationId, prompt, {
-      onText: (text) => this.sender.reply(message, text),
-      onThought: (text) => this.sender.reply(message, `Thought:\n${text}`),
+      onText: async (text) => {
+        if (thoughtStarted && !answerStarted) {
+          answerStarted = true;
+          await reply.write("\n\n## Answer\n\n");
+        }
+        await reply.write(text);
+      },
+      onThought: async (text) => {
+        if (!thoughtStarted) {
+          thoughtStarted = true;
+          await reply.write("## Thought\n\n");
+        }
+        await reply.write(text);
+      },
+      onComplete: () => reply.finish(),
     });
   }
 

@@ -18,6 +18,7 @@ interface ManagedSession {
 export interface PromptCallbacks {
   onText: (text: string) => Promise<void>;
   onThought?: (text: string) => Promise<void>;
+  onComplete?: () => Promise<void>;
 }
 
 export class SessionManager {

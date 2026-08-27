@@ -76,7 +76,18 @@ lines.on("line", (line) => {
         sessionId: request.params.sessionId,
         update: {
           sessionUpdate: "agent_message_chunk",
-          content: { type: "text", text: `echo:${text}` },
+          content: { type: "text", text: "echo:" },
+        },
+      },
+    });
+    send({
+      jsonrpc: "2.0",
+      method: "session/update",
+      params: {
+        sessionId: request.params.sessionId,
+        update: {
+          sessionUpdate: "agent_message_chunk",
+          content: { type: "text", text },
         },
       },
     });

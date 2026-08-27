@@ -27,6 +27,9 @@ export const botConfigSchema = z.object({
   }),
   output: z.object({
     textChunkLimit: z.number().int().min(100).max(4000).default(2000),
+    markdownMode: z.enum(["plain", "native", "raw"]).default("plain"),
+    streamResponses: z.boolean().default(true),
+    streamMinChars: z.number().int().min(100).max(4000).default(400),
     showThoughts: z.boolean().default(false),
   }),
 });
@@ -64,6 +67,9 @@ export function createInitialConfig(input: {
     },
     output: {
       textChunkLimit: 2000,
+      markdownMode: "plain",
+      streamResponses: true,
+      streamMinChars: 400,
       showThoughts: false,
     },
   });

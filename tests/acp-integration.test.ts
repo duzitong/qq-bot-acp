@@ -24,13 +24,18 @@ test("per-conversation manager exchanges prompts with an ACP child process", asy
   );
   manager.start();
   const replies: string[] = [];
+  let completed = false;
   try {
     await manager.prompt(
       "qqbot:test:direct:user",
       [{ type: "text", text: "hello" }],
-      { onText: async (text) => { replies.push(text); } },
+      {
+        onText: async (text) => { replies.push(text); },
+        onComplete: async () => { completed = true; },
+      },
     );
-    assert.deepEqual(replies, ["echo:hello"]);
+    assert.deepEqual(replies, ["echo:", "hello"]);
+    assert.equal(completed, true);
 
     const options = await manager.setSessionConfig(
       "qqbot:test:direct:user",

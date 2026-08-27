@@ -4,21 +4,20 @@ import type * as acp from "@agentclientprotocol/sdk";
 export interface TurnCallbacks {
   onText: (text: string) => Promise<void>;
   onThought?: (text: string) => Promise<void>;
+  onComplete?: () => Promise<void>;
 }
 
 export class QQBotAcpClient implements acp.Client {
   private callbacks: TurnCallbacks = { onText: async () => {} };
-  private text: string[] = [];
-  private thoughts: string[] = [];
   private taskChain = Promise.resolve();
   private showThoughts = false;
+  private callbackError: unknown;
 
   beginTurn(callbacks: TurnCallbacks, showThoughts: boolean): Promise<void> {
     return this.enqueue(async () => {
       this.callbacks = callbacks;
-      this.text = [];
-      this.thoughts = [];
       this.showThoughts = showThoughts;
+      this.callbackError = undefined;
     });
   }
 
@@ -41,7 +40,7 @@ export class QQBotAcpClient implements acp.Client {
         update.sessionUpdate === "agent_message_chunk" &&
         update.content.type === "text"
       ) {
-        this.text.push(update.content.text);
+        await this.invoke(this.callbacks.onText, update.content.text);
         return;
       }
       if (
@@ -49,21 +48,15 @@ export class QQBotAcpClient implements acp.Client {
         update.content.type === "text" &&
         this.showThoughts
       ) {
-        this.thoughts.push(update.content.text);
+        await this.invoke(this.callbacks.onThought, update.content.text);
       }
     });
   }
 
   async flush(): Promise<void> {
     await this.enqueue(async () => {
-      const thought = this.thoughts.join("").trim();
-      const text = this.text.join("").trim();
-      this.thoughts = [];
-      this.text = [];
-      if (thought && this.callbacks.onThought) {
-        await this.callbacks.onThought(thought);
-      }
-      if (text) await this.callbacks.onText(text);
+      if (this.callbackError !== undefined) throw this.callbackError;
+      await this.callbacks.onComplete?.();
     });
   }
 
@@ -85,5 +78,18 @@ export class QQBotAcpClient implements acp.Client {
     const run = this.taskChain.then(task);
     this.taskChain = run.catch(() => {});
     return run;
+  }
+
+  private async invoke(
+    callback: ((text: string) => Promise<void>) | undefined,
+    text: string,
+  ): Promise<void> {
+    if (!callback || !text || this.callbackError !== undefined) return;
+    try {
+      await callback(text);
+    } catch (error) {
+      this.callbackError = error;
+      throw error;
+    }
   }
 }

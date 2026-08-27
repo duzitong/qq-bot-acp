@@ -128,6 +128,36 @@ restored automatically.
 Changes under `qq.*` require a restart. Agent changes terminate active ACP
 processes so each conversation starts against the new agent.
 
+## Output formatting and streaming
+
+Agent responses stream to QQ at complete Markdown block boundaries instead of
+waiting for the entire ACP turn. Small token fragments are buffered until at
+least `output.streamMinChars` characters are available, and fenced code blocks
+are kept together. QQ permits at most five passive replies to one message, so
+the bridge reserves the final reply for remaining output and marks content
+that must be truncated.
+
+By default, common Markdown is converted to readable plain QQ text. Native QQ
+Markdown requires separate invite-only approval for the bot, including
+approval for passive replies. Approved bots can select native rendering:
+
+```text
+/c output.markdownMode "native"
+```
+
+Output behavior can be adjusted from an administrator private chat:
+
+```text
+/c output.markdownMode "plain"
+/c output.streamResponses true
+/c output.streamMinChars 400
+/c output.textChunkLimit 2000
+```
+
+Set `output.markdownMode` to `"raw"` to retain the previous unformatted text
+behavior, or set `output.streamResponses` to `false` to wait for turn
+completion before replying.
+
 ## ACP session configuration
 
 Session options belong to the current QQ conversation and configured agent:

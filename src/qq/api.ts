@@ -10,6 +10,15 @@ interface GatewayResponse {
   url?: string;
 }
 
+export interface QQSendTextInput {
+  chatType: "direct" | "group" | "channel";
+  targetId: string;
+  text: string;
+  replyToId?: string;
+  sequence?: number;
+  markdown?: boolean;
+}
+
 export class QQApi {
   private accessToken?: string;
   private tokenExpiresAt = 0;
@@ -48,22 +57,8 @@ export class QQApi {
     return body.url;
   }
 
-  async sendText(input: {
-    chatType: "direct" | "group" | "channel";
-    targetId: string;
-    text: string;
-    replyToId?: string;
-    sequence?: number;
-  }): Promise<string | undefined> {
-    const body =
-      input.chatType === "channel"
-        ? { content: input.text, msg_id: input.replyToId }
-        : {
-            content: input.text,
-            msg_type: 0,
-            msg_id: input.replyToId,
-            msg_seq: input.sequence ?? 1,
-          };
+  async sendText(input: QQSendTextInput): Promise<string | undefined> {
+    const body = buildTextMessageBody(input);
     const endpoint =
       input.chatType === "direct"
         ? `/v2/users/${encodeURIComponent(input.targetId)}/messages`
@@ -98,4 +93,24 @@ export class QQApi {
     }
     return response;
   }
+}
+
+export function buildTextMessageBody(input: QQSendTextInput): Record<string, unknown> {
+  if (input.chatType === "channel") {
+    return { content: input.text, msg_id: input.replyToId };
+  }
+  if (input.markdown) {
+    return {
+      msg_type: 2,
+      markdown: { content: input.text },
+      msg_id: input.replyToId,
+      msg_seq: input.sequence ?? 1,
+    };
+  }
+  return {
+    content: input.text,
+    msg_type: 0,
+    msg_id: input.replyToId,
+    msg_seq: input.sequence ?? 1,
+  };
 }

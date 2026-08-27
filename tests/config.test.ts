@@ -8,6 +8,7 @@ import { resolveBotPaths } from "../src/config/paths.js";
 import {
   createInitialConfig,
   getConfigValue,
+  parseConfig,
   parseConfigValue,
   setConfigValue,
 } from "../src/config/schema.js";
@@ -35,6 +36,19 @@ test("configuration values support JSON and validated dotted updates", async () 
   assert.deepEqual(getConfigValue(updated, "agent.args"), ["acp"]);
   assert.throws(() => setConfigValue(config, "sessions.maxConcurrent", 0));
   assert.throws(() => setConfigValue(config, "unknown.value", true));
+});
+
+test("legacy configurations receive output formatting defaults", async () => {
+  const { config } = await fixture();
+  const legacy = {
+    ...config,
+    output: {
+      textChunkLimit: config.output.textChunkLimit,
+      showThoughts: config.output.showThoughts,
+    },
+  };
+
+  assert.deepEqual(parseConfig(legacy).output, config.output);
 });
 
 test("admin CLI bootstrap cannot replace an existing administrator", async () => {
