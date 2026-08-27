@@ -87,6 +87,8 @@ export class BotController {
         }
         await reply.write(text);
       },
+      onArtifact: (artifact, caption) =>
+        reply.sendArtifact(artifact, caption),
       onComplete: () => reply.finish(),
     });
   }

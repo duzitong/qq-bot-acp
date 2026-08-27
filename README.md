@@ -163,6 +163,26 @@ Set `output.markdownMode` to `"raw"` to retain the previous unformatted text
 behavior, or set `output.streamResponses` to `false` to wait for turn
 completion before replying.
 
+## Sending artifacts
+
+The bridge automatically gives each ACP session a loopback-only HTTP MCP server
+named `qq-artifacts`; no change to `agent.args` is needed. An agent can
+proactively publish an image to the current QQ conversation by calling:
+
+```text
+send_artifact({ "path": "output/chart.png", "caption": "Optional caption" })
+```
+
+The path may be absolute or relative to `agent.cwd`, but the resolved file must
+remain inside that directory. Merely reading an image does not send it: upload
+occurs only when the agent explicitly calls `send_artifact`.
+
+Artifact delivery currently supports PNG and JPEG files up to 20 MiB in direct
+and group chats. Calls are accepted only while handling an active QQ message,
+duplicate image content is sent once per turn, and at most two artifacts can be
+sent per turn so QQ's five-passive-reply budget retains room for text. The
+configured ACP agent must advertise HTTP MCP support.
+
 ## ACP session configuration
 
 Session options belong to the current QQ conversation and configured agent:

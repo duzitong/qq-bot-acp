@@ -19,6 +19,7 @@ export async function startAgent(
   options?: {
     persistedSessionId?: string;
     resume?: BotConfig["sessions"]["resume"];
+    mcpServers?: acp.McpServer[];
     log?: (message: string) => void;
   },
 ): Promise<AgentConnection> {
@@ -56,6 +57,10 @@ export async function startAgent(
         fs: { readTextFile: true, writeTextFile: true },
       },
     });
+    assertMcpSupport(
+      options?.mcpServers ?? [],
+      initialized.agentCapabilities?.mcpCapabilities,
+    );
 
     const resume = options?.resume ?? "off";
     if (options?.persistedSessionId && resume !== "off") {
@@ -67,7 +72,7 @@ export async function startAgent(
         try {
           const loaded = await connection.loadSession({
             cwd: config.cwd,
-            mcpServers: [],
+            mcpServers: options?.mcpServers ?? [],
             sessionId: options.persistedSessionId,
           });
           return {
@@ -87,7 +92,7 @@ export async function startAgent(
 
     const created = await connection.newSession({
       cwd: config.cwd,
-      mcpServers: [],
+      mcpServers: options?.mcpServers ?? [],
     });
     return {
       process,
@@ -103,8 +108,11 @@ export async function startAgent(
   }
 }
 
-export async function smokeTestAgent(config: BotConfig["agent"]): Promise<void> {
-  const agent = await startAgent(config);
+export async function smokeTestAgent(
+  config: BotConfig["agent"],
+  mcpServers: acp.McpServer[] = [],
+): Promise<void> {
+  const agent = await startAgent(config, { mcpServers });
   await stopAgentProcess(agent.process);
 }
 
@@ -135,4 +143,24 @@ function isResourceNotFound(error: unknown): boolean {
     "code" in error &&
     error.code === -32002
   );
+}
+
+function assertMcpSupport(
+  servers: acp.McpServer[],
+  capabilities: acp.McpCapabilities | null | undefined,
+): void {
+  if (
+    servers.some((server) => "type" in server && server.type === "http") &&
+    capabilities?.http !== true
+  ) {
+    throw new Error(
+      "The configured agent does not support ACP HTTP MCP servers required for QQ artifact delivery",
+    );
+  }
+  if (
+    servers.some((server) => "type" in server && server.type === "sse") &&
+    capabilities?.sse !== true
+  ) {
+    throw new Error("The configured agent does not support ACP SSE MCP servers");
+  }
 }

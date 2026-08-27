@@ -1,4 +1,9 @@
 import type * as acp from "@agentclientprotocol/sdk";
+import {
+  ArtifactBroker,
+  type ArtifactSession,
+} from "../artifacts/broker.js";
+import type { PreparedArtifact } from "../artifacts/file.js";
 import type { BotConfig } from "../config/schema.js";
 import { findSessionOption, SessionStateStore } from "./state.js";
 import {
@@ -10,6 +15,7 @@ import {
 interface ManagedSession {
   key: string;
   agent: AgentConnection;
+  artifacts: ArtifactSession;
   chain: Promise<void>;
   active: boolean;
   lastActivity: number;
@@ -18,6 +24,10 @@ interface ManagedSession {
 export interface PromptCallbacks {
   onText: (text: string) => Promise<void>;
   onThought?: (text: string) => Promise<void>;
+  onArtifact?: (
+    artifact: PreparedArtifact,
+    caption?: string,
+  ) => Promise<{ alreadySent: boolean }>;
   onComplete?: () => Promise<void>;
 }
 
@@ -29,6 +39,7 @@ export class SessionManager {
   constructor(
     private config: BotConfig,
     private readonly state: SessionStateStore,
+    private readonly artifactBroker: ArtifactBroker,
     private readonly log: (message: string) => void,
   ) {}
 
@@ -43,7 +54,7 @@ export class SessionManager {
     this.pendingSessions.clear();
     const sessions = [...this.sessions.values()];
     this.sessions.clear();
-    await Promise.allSettled(sessions.map((session) => stopAgentProcess(session.agent.process)));
+    await Promise.allSettled(sessions.map((session) => this.stopSession(session)));
   }
 
   async updateConfig(config: BotConfig): Promise<void> {
@@ -61,6 +72,12 @@ export class SessionManager {
   ): Promise<void> {
     return this.enqueue(key, async (session) => {
       await session.agent.client.beginTurn(callbacks, this.config.output.showThoughts);
+      session.artifacts.beginTurn(
+        callbacks.onArtifact ??
+          (async () => {
+            throw new Error("Artifact delivery is unavailable for this turn");
+          }),
+      );
       session.active = true;
       try {
         await session.agent.connection.prompt({
@@ -70,6 +87,7 @@ export class SessionManager {
         await session.agent.client.flush();
         await this.state.setSessionId(key, this.config.agent, session.agent.sessionId);
       } finally {
+        session.artifacts.endTurn();
         session.active = false;
         session.lastActivity = Date.now();
       }
@@ -88,7 +106,7 @@ export class SessionManager {
     this.sessions.delete(key);
     await this.state.clearSession(key, this.config.agent);
     if (!session) return false;
-    await stopAgentProcess(session.agent.process);
+    await this.stopSession(session);
     return true;
   }
 
@@ -169,24 +187,40 @@ export class SessionManager {
       await this.evictOldest();
     }
     const persistedSessionId = await this.state.getSessionId(key, this.config.agent);
-    const agent = await startAgent(this.config.agent, {
-      persistedSessionId,
-      resume: this.config.sessions.resume,
-      log: (message) => this.log(`[${key}] ${message}`),
-    });
+    const artifacts = this.artifactBroker.createSession(this.config.agent.cwd);
+    let agent: AgentConnection;
+    try {
+      agent = await startAgent(this.config.agent, {
+        persistedSessionId,
+        resume: this.config.sessions.resume,
+        mcpServers: [artifacts.mcpServer],
+        log: (message) => this.log(`[${key}] ${message}`),
+      });
+    } catch (error) {
+      artifacts.dispose();
+      throw error;
+    }
     const session: ManagedSession = {
       key,
       agent,
+      artifacts,
       chain: Promise.resolve(),
       active: false,
       lastActivity: Date.now(),
     };
     this.sessions.set(key, session);
     agent.process.once("exit", () => {
+      artifacts.dispose();
       if (this.sessions.get(key) === session) this.sessions.delete(key);
     });
-    await this.applyPersistedOptions(session);
-    return session;
+    try {
+      await this.applyPersistedOptions(session);
+      return session;
+    } catch (error) {
+      if (this.sessions.get(key) === session) this.sessions.delete(key);
+      await this.stopSession(session);
+      throw error;
+    }
   }
 
   private async applyPersistedOptions(session: ManagedSession): Promise<void> {
@@ -210,7 +244,7 @@ export class SessionManager {
     );
     for (const session of expired) {
       this.sessions.delete(session.key);
-      await stopAgentProcess(session.agent.process);
+      await this.stopSession(session);
     }
   }
 
@@ -220,12 +254,17 @@ export class SessionManager {
       .sort((left, right) => left.lastActivity - right.lastActivity)[0];
     if (!oldest) throw new Error("Maximum concurrent ACP sessions reached");
     this.sessions.delete(oldest.key);
-    await stopAgentProcess(oldest.agent.process);
+    await this.stopSession(oldest);
   }
 
   private async resetAll(): Promise<void> {
     const sessions = [...this.sessions.values()];
     this.sessions.clear();
-    await Promise.allSettled(sessions.map((session) => stopAgentProcess(session.agent.process)));
+    await Promise.allSettled(sessions.map((session) => this.stopSession(session)));
+  }
+
+  private async stopSession(session: ManagedSession): Promise<void> {
+    session.artifacts.dispose();
+    await stopAgentProcess(session.agent.process);
   }
 }

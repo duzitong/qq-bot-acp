@@ -16,12 +16,37 @@ lines.on("line", (line) => {
         protocolVersion: request.params.protocolVersion,
         agentCapabilities: {
           loadSession: false,
+          mcpCapabilities: {
+            http: true,
+          },
         },
       },
     });
     return;
   }
   if (request.method === "session/new") {
+    const artifacts = request.params.mcpServers?.find(
+      (server) => server.name === "qq-artifacts",
+    );
+    if (
+      artifacts?.type !== "http" ||
+      !artifacts.url?.startsWith("http://127.0.0.1:") ||
+      !artifacts.headers?.some(
+        (header) =>
+          header.name.toLowerCase() === "authorization" &&
+          /^Bearer [0-9a-f]{64}$/.test(header.value),
+      )
+    ) {
+      send({
+        jsonrpc: "2.0",
+        id: request.id,
+        error: {
+          code: -32602,
+          message: "qq-artifacts HTTP MCP server was not injected",
+        },
+      });
+      return;
+    }
     send({
       jsonrpc: "2.0",
       id: request.id,

@@ -5,6 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import { SessionManager } from "../src/acp/session-manager.js";
 import { SessionStateStore } from "../src/acp/state.js";
+import { ArtifactBroker } from "../src/artifacts/broker.js";
 import { createInitialConfig } from "../src/config/schema.js";
 
 test("per-conversation manager exchanges prompts with an ACP child process", async () => {
@@ -17,9 +18,12 @@ test("per-conversation manager exchanges prompts with an ACP child process", asy
     agentArgs: [fixture],
     agentCwd: process.cwd(),
   });
+  const artifacts = new ArtifactBroker(() => {});
+  await artifacts.start();
   const manager = new SessionManager(
     config,
     new SessionStateStore(path.join(temp, "sessions.json")),
+    artifacts,
     () => {},
   );
   manager.start();
@@ -45,5 +49,7 @@ test("per-conversation manager exchanges prompts with an ACP child process", asy
     assert.equal(options[0]?.currentValue, "large");
   } finally {
     await manager.stop();
+    await artifacts.stop();
+    await fs.rm(temp, { recursive: true, force: true });
   }
 });

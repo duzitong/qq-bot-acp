@@ -1,5 +1,10 @@
+import type { PreparedArtifact } from "../artifacts/file.js";
 import type { BotConfig } from "../config/schema.js";
-import type { QQSendTextInput } from "./api.js";
+import type {
+  QQSendMediaInput,
+  QQSendTextInput,
+  QQUploadImageInput,
+} from "./api.js";
 import {
   findStreamingSplit,
   renderMarkdownForQQ,
@@ -9,17 +14,25 @@ import {
 import type { QQInboundMessage } from "./types.js";
 
 const MAX_PASSIVE_REPLIES = 5;
-const STREAM_REPLY_RESERVE = 1;
+const PROGRESSIVE_REPLY_LIMIT = 2;
+const FINAL_REPLY_RESERVE = 1;
+const MAX_ARTIFACTS_PER_TURN = 2;
 const STREAM_LENGTH_MARGIN = 64;
 const TRUNCATION_NOTICE =
   "[Response truncated: QQ allows at most 5 replies to one message.]";
 
 export interface QQMessageApi {
   sendText(input: QQSendTextInput): Promise<string | undefined>;
+  uploadImage(input: QQUploadImageInput): Promise<string>;
+  sendMedia(input: QQSendMediaInput): Promise<string | undefined>;
 }
 
 export interface QQReplyStream {
   write(text: string): Promise<void>;
+  sendArtifact(
+    artifact: PreparedArtifact,
+    caption?: string,
+  ): Promise<{ alreadySent: boolean }>;
   finish(): Promise<void>;
 }
 
@@ -47,7 +60,10 @@ export class QQSender {
 class BufferedQQReply implements QQReplyStream {
   private buffer = "";
   private sent = 0;
+  private artifactsSent = 0;
+  private readonly artifactDigests = new Set<string>();
   private finished = false;
+  private operationChain = Promise.resolve();
 
   constructor(
     private readonly api: QQMessageApi,
@@ -55,14 +71,68 @@ class BufferedQQReply implements QQReplyStream {
     private readonly output: BotConfig["output"],
   ) {}
 
-  async write(text: string): Promise<void> {
+  write(text: string): Promise<void> {
+    return this.enqueue(() => this.writeNow(text));
+  }
+
+  sendArtifact(
+    artifact: PreparedArtifact,
+    caption?: string,
+  ): Promise<{ alreadySent: boolean }> {
+    return this.enqueue(() => this.sendArtifactNow(artifact, caption));
+  }
+
+  finish(): Promise<void> {
+    return this.enqueue(() => this.finishNow());
+  }
+
+  private async writeNow(text: string): Promise<void> {
     if (this.finished) throw new Error("Cannot write to a finished QQ reply");
     if (!text) return;
     this.buffer += text;
     if (this.output.streamResponses) await this.flushProgressive();
   }
 
-  async finish(): Promise<void> {
+  private async sendArtifactNow(
+    artifact: PreparedArtifact,
+    caption?: string,
+  ): Promise<{ alreadySent: boolean }> {
+    if (this.finished) throw new Error("Cannot send from a finished QQ reply");
+    if (this.artifactDigests.has(artifact.digest)) {
+      return { alreadySent: true };
+    }
+    if (this.message.chatType === "channel") {
+      throw new Error("QQ artifact delivery is not supported in channel chats");
+    }
+    if (this.artifactsSent >= MAX_ARTIFACTS_PER_TURN) {
+      throw new Error(
+        `At most ${MAX_ARTIFACTS_PER_TURN} artifacts can be sent in one QQ turn`,
+      );
+    }
+    if (this.sent >= MAX_PASSIVE_REPLIES - FINAL_REPLY_RESERVE) {
+      throw new Error("No QQ reply slot remains for another artifact");
+    }
+
+    const fileInfo = await this.api.uploadImage({
+      chatType: this.message.chatType,
+      targetId: this.message.targetId,
+      data: artifact.data,
+    });
+    await this.api.sendMedia({
+      chatType: this.message.chatType,
+      targetId: this.message.targetId,
+      fileInfo,
+      replyToId: this.message.messageId,
+      sequence: this.sent + 1,
+      caption: caption ? this.render(caption) : undefined,
+    });
+    this.sent++;
+    this.artifactsSent++;
+    this.artifactDigests.add(artifact.digest);
+    return { alreadySent: false };
+  }
+
+  private async finishNow(): Promise<void> {
     if (this.finished) return;
 
     const rendered = this.render(this.buffer);
@@ -76,15 +146,22 @@ class BufferedQQReply implements QQReplyStream {
     this.finished = true;
   }
 
+  private enqueue<T>(operation: () => Promise<T>): Promise<T> {
+    const run = this.operationChain.then(operation);
+    this.operationChain = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
+  }
+
   private async flushProgressive(): Promise<void> {
-    const progressiveLimit =
-      MAX_PASSIVE_REPLIES - STREAM_REPLY_RESERVE;
     const maxLength = Math.max(
       this.output.streamMinChars,
       this.output.textChunkLimit - STREAM_LENGTH_MARGIN,
     );
 
-    while (this.sent < progressiveLimit) {
+    while (this.sent < PROGRESSIVE_REPLY_LIMIT) {
       const splitAt = findStreamingSplit(
         this.buffer,
         this.output.streamMinChars,
@@ -94,7 +171,7 @@ class BufferedQQReply implements QQReplyStream {
 
       const raw = this.buffer.slice(0, splitAt).trim();
       const chunks = splitText(this.render(raw), this.output.textChunkLimit);
-      if (chunks.length > progressiveLimit - this.sent) return;
+      if (chunks.length > PROGRESSIVE_REPLY_LIMIT - this.sent) return;
 
       this.buffer = trimBlockStart(this.buffer.slice(splitAt));
       await this.sendChunks(chunks);

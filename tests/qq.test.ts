@@ -2,8 +2,12 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { createInitialConfig, type BotConfig } from "../src/config/schema.js";
 import {
+  buildImageUploadBody,
+  buildMediaMessageBody,
   buildTextMessageBody,
+  type QQSendMediaInput,
   type QQSendTextInput,
+  type QQUploadImageInput,
 } from "../src/qq/api.js";
 import { QQSender } from "../src/qq/sender.js";
 import {
@@ -11,6 +15,7 @@ import {
   renderMarkdownForQQ,
   splitText,
 } from "../src/qq/format.js";
+import type { PreparedArtifact } from "../src/artifacts/file.js";
 import type { QQInboundMessage } from "../src/qq/types.js";
 
 test("QQ replies split at natural boundaries", () => {
@@ -163,6 +168,77 @@ test("native Markdown uses the QQ markdown message payload", () => {
   );
 });
 
+test("QQ image upload and media payloads use rich-media messages", () => {
+  assert.deepEqual(buildImageUploadBody(Buffer.from([0, 1, 2])), {
+    file_type: 1,
+    file_data: "AAEC",
+    srv_send_msg: false,
+  });
+  assert.deepEqual(
+    buildMediaMessageBody({
+      chatType: "group",
+      targetId: "group",
+      fileInfo: "uploaded-file",
+      replyToId: "inbound",
+      sequence: 3,
+      caption: " Chart ",
+    }),
+    {
+      content: "Chart",
+      msg_type: 7,
+      media: { file_info: "uploaded-file" },
+      msg_id: "inbound",
+      msg_seq: 3,
+    },
+  );
+});
+
+test("artifacts share reply sequencing and are deduplicated per turn", async () => {
+  const { sender, sent, uploads, media, operations } = senderFixture({
+    textChunkLimit: 200,
+    streamMinChars: 100,
+  });
+  const reply = sender.createReply(inboundMessage());
+  const chart = artifact("chart", "chart.png");
+  const diagram = artifact("diagram", "diagram.jpg");
+
+  await reply.write(`${"a".repeat(110)}\n\n`);
+  assert.deepEqual(sent.map(({ sequence }) => sequence), [1]);
+
+  assert.deepEqual(await reply.sendArtifact(chart, "**Chart**"), {
+    alreadySent: false,
+  });
+  assert.deepEqual(await reply.sendArtifact(chart, "Duplicate"), {
+    alreadySent: true,
+  });
+  assert.deepEqual(await reply.sendArtifact(diagram), {
+    alreadySent: false,
+  });
+  await assert.rejects(
+    reply.sendArtifact(artifact("third", "third.png")),
+    /At most 2 artifacts/,
+  );
+
+  await reply.write("Final **answer**.");
+  await reply.finish();
+
+  assert.equal(uploads.length, 2);
+  assert.deepEqual(media.map(({ sequence }) => sequence), [2, 3]);
+  assert.equal(media[0]?.caption, "Chart");
+  assert.deepEqual(sent.map(({ sequence }) => sequence), [1, 4]);
+  assert.deepEqual(
+    operations,
+    [
+      "text:1",
+      "upload:chart",
+      "media:2",
+      "upload:diagram",
+      "media:3",
+      "text:4",
+    ],
+  );
+});
+
 function senderFixture(output: Partial<BotConfig["output"]> = {}) {
   const config = createInitialConfig({
     appId: "app",
@@ -171,16 +247,39 @@ function senderFixture(output: Partial<BotConfig["output"]> = {}) {
   });
   config.output = { ...config.output, ...output };
   const sent: QQSendTextInput[] = [];
+  const uploads: QQUploadImageInput[] = [];
+  const media: QQSendMediaInput[] = [];
+  const operations: string[] = [];
   const sender = new QQSender(
     {
       sendText: async (input) => {
         sent.push(input);
+        operations.push(`text:${input.sequence}`);
         return `message-${sent.length}`;
+      },
+      uploadImage: async (input) => {
+        uploads.push(input);
+        operations.push(`upload:${input.data.toString()}`);
+        return `file-${uploads.length}`;
+      },
+      sendMedia: async (input) => {
+        media.push(input);
+        operations.push(`media:${input.sequence}`);
+        return `media-${media.length}`;
       },
     },
     () => config,
   );
-  return { sender, sent };
+  return { sender, sent, uploads, media, operations };
+}
+
+function artifact(digest: string, fileName: string): PreparedArtifact {
+  return {
+    data: Buffer.from(digest),
+    digest,
+    fileName,
+    mimeType: fileName.endsWith(".jpg") ? "image/jpeg" : "image/png",
+  };
 }
 
 function inboundMessage(): QQInboundMessage {

@@ -19,6 +19,21 @@ export interface QQSendTextInput {
   markdown?: boolean;
 }
 
+export interface QQUploadImageInput {
+  chatType: "direct" | "group";
+  targetId: string;
+  data: Buffer;
+}
+
+export interface QQSendMediaInput {
+  chatType: "direct" | "group";
+  targetId: string;
+  fileInfo: string;
+  replyToId: string;
+  sequence: number;
+  caption?: string;
+}
+
 export class QQApi {
   private accessToken?: string;
   private tokenExpiresAt = 0;
@@ -77,6 +92,46 @@ export class QQApi {
     return result.id;
   }
 
+  async uploadImage(input: QQUploadImageInput): Promise<string> {
+    const endpoint =
+      input.chatType === "direct"
+        ? `/v2/users/${encodeURIComponent(input.targetId)}/files`
+        : `/v2/groups/${encodeURIComponent(input.targetId)}/files`;
+    const response = await this.request(endpoint, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(buildImageUploadBody(input.data)),
+    });
+    const result = (await response.json().catch(() => ({}))) as {
+      file_info?: string;
+      message?: string;
+    };
+    if (!response.ok || !result.file_info) {
+      throw new Error(`QQ image upload failed (${response.status}): ${JSON.stringify(result)}`);
+    }
+    return result.file_info;
+  }
+
+  async sendMedia(input: QQSendMediaInput): Promise<string | undefined> {
+    const endpoint =
+      input.chatType === "direct"
+        ? `/v2/users/${encodeURIComponent(input.targetId)}/messages`
+        : `/v2/groups/${encodeURIComponent(input.targetId)}/messages`;
+    const response = await this.request(endpoint, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(buildMediaMessageBody(input)),
+    });
+    const result = (await response.json().catch(() => ({}))) as {
+      id?: string;
+      message?: string;
+    };
+    if (!response.ok) {
+      throw new Error(`QQ media send failed (${response.status}): ${JSON.stringify(result)}`);
+    }
+    return result.id;
+  }
+
   private async request(endpoint: string, init: RequestInit, retry = true): Promise<Response> {
     const token = await this.getAccessToken();
     const response = await fetch(`${API_BASE_URL}${endpoint}`, {
@@ -107,10 +162,29 @@ export function buildTextMessageBody(input: QQSendTextInput): Record<string, unk
       msg_seq: input.sequence ?? 1,
     };
   }
+
   return {
     content: input.text,
     msg_type: 0,
     msg_id: input.replyToId,
     msg_seq: input.sequence ?? 1,
+  };
+}
+
+export function buildImageUploadBody(data: Buffer): Record<string, unknown> {
+  return {
+    file_type: 1,
+    file_data: data.toString("base64"),
+    srv_send_msg: false,
+  };
+}
+
+export function buildMediaMessageBody(input: QQSendMediaInput): Record<string, unknown> {
+  return {
+    content: input.caption?.trim() || " ",
+    msg_type: 7,
+    media: { file_info: input.fileInfo },
+    msg_id: input.replyToId,
+    msg_seq: input.sequence,
   };
 }

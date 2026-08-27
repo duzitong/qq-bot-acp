@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import { smokeTestAgent } from "./acp/process.js";
 import { SessionManager } from "./acp/session-manager.js";
 import { SessionStateStore } from "./acp/state.js";
+import { ArtifactBroker } from "./artifacts/broker.js";
 import { BotController } from "./bot/controller.js";
 import type { BotConfig } from "./config/schema.js";
 import { ConfigStore } from "./config/store.js";
@@ -18,11 +19,13 @@ export class BotRuntime {
     config: BotConfig,
     store: ConfigStore,
     api: QQApi,
+    private readonly artifacts: ArtifactBroker,
     private readonly log: (message: string) => void,
   ) {
     this.sessions = new SessionManager(
       config,
       new SessionStateStore(store.paths.sessions),
+      artifacts,
       log,
     );
     let controller!: BotController;
@@ -46,8 +49,18 @@ export class BotRuntime {
     if (!secret) throw new Error(`QQ client secret file is empty: ${config.qq.clientSecretFile}`);
     const api = new QQApi(config.qq.appId, secret);
     await api.getAccessToken();
-    await smokeTestAgent(config.agent);
-    return new BotRuntime(config, store, api, log);
+    const artifacts = new ArtifactBroker(log);
+    await artifacts.start();
+    const testArtifacts = artifacts.createSession(config.agent.cwd);
+    try {
+      await smokeTestAgent(config.agent, [testArtifacts.mcpServer]);
+      return new BotRuntime(config, store, api, artifacts, log);
+    } catch (error) {
+      await artifacts.stop();
+      throw error;
+    } finally {
+      testArtifacts.dispose();
+    }
   }
 
   async start(): Promise<void> {
@@ -63,5 +76,6 @@ export class BotRuntime {
 
   async stop(): Promise<void> {
     await Promise.allSettled([this.gateway.stop(), this.sessions.stop()]);
+    await this.artifacts.stop();
   }
 }
