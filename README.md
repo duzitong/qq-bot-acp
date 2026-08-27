@@ -13,9 +13,29 @@ automatically accepts ACP tool permission requests.
 - A bot created on the QQ Open Platform
 - An ACP-compatible agent command
 
+## Create a QQ bot
+
+Use the official QQ Open Platform:
+
+- Management console: <https://q.qq.com/>
+- Official bot documentation: <https://bot.q.qq.com/wiki/>
+- Introduction and access guide:
+  <https://bot.q.qq.com/wiki/bot_new_product-intro/>
+- API authentication:
+  <https://bot.q.qq.com/wiki/develop/api-v2/dev-prepare/interface-framework/api-use.html>
+
+1. Open <https://q.qq.com/> and sign in by scanning the QR code with QQ.
+2. Complete developer identity verification if requested.
+3. Select **创建机器人** (**Create Bot**).
+4. Enter the bot's name, avatar, description, and other required details.
+5. Open the newly created bot's development/settings page.
+6. Copy its **AppID**.
+7. Generate or reveal its **AppSecret**, then save it immediately. QQ may not
+   display the secret again.
+
 ## Install
 
-```powershell
+```bash
 npm install
 npm run build
 npm link
@@ -23,17 +43,27 @@ npm link
 
 ## Initialize
 
-Store the QQ AppSecret in a local file readable by the bot account, then create
-the initial configuration:
+Store the AppSecret in a local file rather than putting it in a command or the
+repository:
 
-```powershell
-qq-bot-acp init `
-  --app-id "YOUR_QQ_APP_ID" `
-  --client-secret-file "C:\secrets\qq-app-secret.txt" `
-  --agent "npx" `
-  --agent-arg "@github/copilot" `
-  --agent-arg "--acp" `
-  --cwd "C:\projects\agent-workspace"
+```bash
+mkdir -p "$HOME/.qq-bot-acp/secrets"
+printf '%s' 'YOUR_APP_SECRET' \
+  > "$HOME/.qq-bot-acp/secrets/qq-app-secret.txt"
+chmod 700 "$HOME/.qq-bot-acp" "$HOME/.qq-bot-acp/secrets"
+chmod 600 "$HOME/.qq-bot-acp/secrets/qq-app-secret.txt"
+```
+
+Then initialize the bridge:
+
+```bash
+qq-bot-acp init \
+  --app-id "YOUR_APP_ID" \
+  --client-secret-file "$HOME/.qq-bot-acp/secrets/qq-app-secret.txt" \
+  --agent "npx" \
+  --agent-arg "@github/copilot" \
+  --agent-arg "--acp" \
+  --cwd "/path/to/agent-workspace"
 ```
 
 Initialization is the only CLI configuration surface besides administrator
