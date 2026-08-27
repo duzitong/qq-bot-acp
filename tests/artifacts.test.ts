@@ -16,6 +16,12 @@ const PNG = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
   "base64",
 );
+const MP4 = Buffer.concat([
+  Buffer.from([0x00, 0x00, 0x00, 0x18]),
+  Buffer.from("ftypisom", "ascii"),
+  Buffer.from([0x00, 0x00, 0x02, 0x00]),
+  Buffer.from("isommp42", "ascii"),
+]);
 
 test("artifact files are contained, typed, and size-limited", async () => {
   const parent = await fs.mkdtemp(path.join(os.tmpdir(), "qq-artifacts-files-"));
@@ -25,6 +31,21 @@ test("artifact files are contained, typed, and size-limited", async () => {
   try {
     await fs.writeFile(path.join(root, "image.png"), PNG);
     await fs.writeFile(path.join(root, "image.jpg"), Buffer.from([0xff, 0xd8, 0xff, 0xd9]));
+    await fs.writeFile(path.join(root, "video.mp4"), MP4);
+    await fs.writeFile(path.join(root, "voice.silk"), Buffer.from("#!SILK_V3voice"));
+    await fs.writeFile(path.join(root, "voice.mp3"), Buffer.from("ID3voice"));
+    await fs.writeFile(
+      path.join(root, "voice.wav"),
+      Buffer.concat([
+        Buffer.from("RIFF"),
+        Buffer.alloc(4),
+        Buffer.from("WAVEvoice"),
+      ]),
+    );
+    await fs.writeFile(
+      path.join(root, "voice.ogg"),
+      Buffer.from("OggS\0\0\0\0OpusHeadvoice"),
+    );
     await fs.writeFile(path.join(root, "notes.txt"), "not an image");
     await fs.writeFile(outside, PNG);
     await fs.symlink(outside, path.join(root, "escaped.png"));
@@ -33,12 +54,33 @@ test("artifact files are contained, typed, and size-limited", async () => {
     await oversized.close();
 
     const png = await prepareArtifact(root, "image.png");
+    assert.equal(png.kind, "image");
     assert.equal(png.mimeType, "image/png");
     assert.equal(png.fileName, "image.png");
     assert.deepEqual(png.data, PNG);
 
     const jpeg = await prepareArtifact(root, "image.jpg");
+    assert.equal(jpeg.kind, "image");
     assert.equal(jpeg.mimeType, "image/jpeg");
+
+    const video = await prepareArtifact(root, "video.mp4");
+    assert.equal(video.kind, "video");
+    assert.equal(video.mimeType, "video/mp4");
+
+    const voiceTypes = await Promise.all(
+      ["voice.silk", "voice.mp3", "voice.wav", "voice.ogg"].map(
+        (fileName) => prepareArtifact(root, fileName),
+      ),
+    );
+    assert.deepEqual(
+      voiceTypes.map(({ kind, mimeType }) => ({ kind, mimeType })),
+      [
+        { kind: "voice", mimeType: "audio/silk" },
+        { kind: "voice", mimeType: "audio/mpeg" },
+        { kind: "voice", mimeType: "audio/wav" },
+        { kind: "voice", mimeType: "audio/ogg" },
+      ],
+    );
     await assert.rejects(
       prepareArtifact(root, outside),
       /inside the agent working directory/,
@@ -60,11 +102,8 @@ test("HTTP MCP exposes explicit, token-isolated artifact delivery", async () => 
   const secondRoot = path.join(parent, "second");
   await fs.mkdir(firstRoot);
   await fs.mkdir(secondRoot);
-  await fs.writeFile(path.join(firstRoot, "image.png"), PNG);
-  await fs.writeFile(
-    path.join(secondRoot, "image.png"),
-    Buffer.concat([PNG, Buffer.from("second")]),
-  );
+  await fs.writeFile(path.join(firstRoot, "video.mp4"), MP4);
+  await fs.writeFile(path.join(secondRoot, "voice.silk"), "#!SILK_V3voice");
 
   const logs: string[] = [];
   const broker = new ArtifactBroker((message) => logs.push(message));
@@ -82,40 +121,42 @@ test("HTTP MCP exposes explicit, token-isolated artifact delivery", async () => 
 
     const inactive = await firstClient.client.callTool({
       name: "send_artifact",
-      arguments: { path: "image.png" },
+      arguments: { path: "video.mp4" },
     });
     assert.equal(inactive.isError, true);
     assert.match(textResult(inactive), /only during an active QQ turn/);
 
     firstSession.beginTurn(async (artifact, caption) => {
       firstDeliveries.push(artifact);
-      assert.equal(caption, "First image");
+      assert.equal(artifact.kind, "video");
+      assert.equal(caption, "First video");
       return { alreadySent: false };
     });
     secondSession.beginTurn(async (artifact) => {
       secondDeliveries.push(artifact);
+      assert.equal(artifact.kind, "voice");
       return { alreadySent: false };
     });
 
     const sent = await firstClient.client.callTool({
       name: "send_artifact",
-      arguments: { path: "image.png", caption: "First image" },
+      arguments: { path: "video.mp4", caption: "First video" },
     });
     assert.equal(sent.isError, undefined);
-    assert.equal(textResult(sent), "Sent image.png to QQ.");
+    assert.equal(textResult(sent), "Sent video.mp4 to QQ.");
     assert.equal(firstDeliveries.length, 1);
     assert.equal(secondDeliveries.length, 0);
 
     const escaped = await firstClient.client.callTool({
       name: "send_artifact",
-      arguments: { path: "../second/image.png" },
+      arguments: { path: "../second/voice.silk" },
     });
     assert.equal(escaped.isError, true);
     assert.match(textResult(escaped), /inside the agent working directory/);
 
     await secondClient.client.callTool({
       name: "send_artifact",
-      arguments: { path: "image.png" },
+      arguments: { path: "voice.silk" },
     });
     assert.equal(firstDeliveries.length, 1);
     assert.equal(secondDeliveries.length, 1);

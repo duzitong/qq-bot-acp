@@ -1,9 +1,13 @@
-import type { PreparedArtifact } from "../artifacts/file.js";
+import type {
+  ArtifactKind,
+  PreparedArtifact,
+} from "../artifacts/file.js";
 import type { BotConfig } from "../config/schema.js";
 import type {
+  QQMediaFileType,
   QQSendMediaInput,
   QQSendTextInput,
-  QQUploadImageInput,
+  QQUploadMediaInput,
 } from "./api.js";
 import {
   findStreamingSplit,
@@ -23,7 +27,7 @@ const TRUNCATION_NOTICE =
 
 export interface QQMessageApi {
   sendText(input: QQSendTextInput): Promise<string | undefined>;
-  uploadImage(input: QQUploadImageInput): Promise<string>;
+  uploadMedia(input: QQUploadMediaInput): Promise<string>;
   sendMedia(input: QQSendMediaInput): Promise<string | undefined>;
 }
 
@@ -113,10 +117,11 @@ class BufferedQQReply implements QQReplyStream {
       throw new Error("No QQ reply slot remains for another artifact");
     }
 
-    const fileInfo = await this.api.uploadImage({
+    const fileInfo = await this.api.uploadMedia({
       chatType: this.message.chatType,
       targetId: this.message.targetId,
       data: artifact.data,
+      fileType: qqMediaFileType(artifact.kind),
     });
     await this.api.sendMedia({
       chatType: this.message.chatType,
@@ -198,6 +203,17 @@ class BufferedQQReply implements QQReplyStream {
       });
       this.sent++;
     }
+  }
+}
+
+function qqMediaFileType(kind: ArtifactKind): QQMediaFileType {
+  switch (kind) {
+    case "image":
+      return 1;
+    case "video":
+      return 2;
+    case "voice":
+      return 3;
   }
 }
 

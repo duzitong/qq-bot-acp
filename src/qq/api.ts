@@ -19,10 +19,13 @@ export interface QQSendTextInput {
   markdown?: boolean;
 }
 
-export interface QQUploadImageInput {
+export type QQMediaFileType = 1 | 2 | 3;
+
+export interface QQUploadMediaInput {
   chatType: "direct" | "group";
   targetId: string;
   data: Buffer;
+  fileType: QQMediaFileType;
 }
 
 export interface QQSendMediaInput {
@@ -92,7 +95,7 @@ export class QQApi {
     return result.id;
   }
 
-  async uploadImage(input: QQUploadImageInput): Promise<string> {
+  async uploadMedia(input: QQUploadMediaInput): Promise<string> {
     const endpoint =
       input.chatType === "direct"
         ? `/v2/users/${encodeURIComponent(input.targetId)}/files`
@@ -100,14 +103,14 @@ export class QQApi {
     const response = await this.request(endpoint, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify(buildImageUploadBody(input.data)),
+      body: JSON.stringify(buildMediaUploadBody(input.data, input.fileType)),
     });
     const result = (await response.json().catch(() => ({}))) as {
       file_info?: string;
       message?: string;
     };
     if (!response.ok || !result.file_info) {
-      throw new Error(`QQ image upload failed (${response.status}): ${JSON.stringify(result)}`);
+      throw new Error(`QQ media upload failed (${response.status}): ${JSON.stringify(result)}`);
     }
     return result.file_info;
   }
@@ -171,9 +174,12 @@ export function buildTextMessageBody(input: QQSendTextInput): Record<string, unk
   };
 }
 
-export function buildImageUploadBody(data: Buffer): Record<string, unknown> {
+export function buildMediaUploadBody(
+  data: Buffer,
+  fileType: QQMediaFileType,
+): Record<string, unknown> {
   return {
-    file_type: 1,
+    file_type: fileType,
     file_data: data.toString("base64"),
     srv_send_msg: false,
   };

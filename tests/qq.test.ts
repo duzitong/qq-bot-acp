@@ -2,12 +2,12 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { createInitialConfig, type BotConfig } from "../src/config/schema.js";
 import {
-  buildImageUploadBody,
+  buildMediaUploadBody,
   buildMediaMessageBody,
   buildTextMessageBody,
   type QQSendMediaInput,
   type QQSendTextInput,
-  type QQUploadImageInput,
+  type QQUploadMediaInput,
 } from "../src/qq/api.js";
 import { QQSender } from "../src/qq/sender.js";
 import {
@@ -168,12 +168,14 @@ test("native Markdown uses the QQ markdown message payload", () => {
   );
 });
 
-test("QQ image upload and media payloads use rich-media messages", () => {
-  assert.deepEqual(buildImageUploadBody(Buffer.from([0, 1, 2])), {
-    file_type: 1,
-    file_data: "AAEC",
-    srv_send_msg: false,
-  });
+test("QQ artifact uploads and media payloads use rich-media messages", () => {
+  for (const fileType of [1, 2, 3] as const) {
+    assert.deepEqual(buildMediaUploadBody(Buffer.from([0, 1, 2]), fileType), {
+      file_type: fileType,
+      file_data: "AAEC",
+      srv_send_msg: false,
+    });
+  }
   assert.deepEqual(
     buildMediaMessageBody({
       chatType: "group",
@@ -199,19 +201,19 @@ test("artifacts share reply sequencing and are deduplicated per turn", async () 
     streamMinChars: 100,
   });
   const reply = sender.createReply(inboundMessage());
-  const chart = artifact("chart", "chart.png");
-  const diagram = artifact("diagram", "diagram.jpg");
+  const video = artifact("video", "clip.mp4");
+  const voice = artifact("voice", "voice.silk");
 
   await reply.write(`${"a".repeat(110)}\n\n`);
   assert.deepEqual(sent.map(({ sequence }) => sequence), [1]);
 
-  assert.deepEqual(await reply.sendArtifact(chart, "**Chart**"), {
+  assert.deepEqual(await reply.sendArtifact(video, "**Clip**"), {
     alreadySent: false,
   });
-  assert.deepEqual(await reply.sendArtifact(chart, "Duplicate"), {
+  assert.deepEqual(await reply.sendArtifact(video, "Duplicate"), {
     alreadySent: true,
   });
-  assert.deepEqual(await reply.sendArtifact(diagram), {
+  assert.deepEqual(await reply.sendArtifact(voice), {
     alreadySent: false,
   });
   await assert.rejects(
@@ -223,16 +225,17 @@ test("artifacts share reply sequencing and are deduplicated per turn", async () 
   await reply.finish();
 
   assert.equal(uploads.length, 2);
+  assert.deepEqual(uploads.map(({ fileType }) => fileType), [2, 3]);
   assert.deepEqual(media.map(({ sequence }) => sequence), [2, 3]);
-  assert.equal(media[0]?.caption, "Chart");
+  assert.equal(media[0]?.caption, "Clip");
   assert.deepEqual(sent.map(({ sequence }) => sequence), [1, 4]);
   assert.deepEqual(
     operations,
     [
       "text:1",
-      "upload:chart",
+      "upload:video",
       "media:2",
-      "upload:diagram",
+      "upload:voice",
       "media:3",
       "text:4",
     ],
@@ -247,7 +250,7 @@ function senderFixture(output: Partial<BotConfig["output"]> = {}) {
   });
   config.output = { ...config.output, ...output };
   const sent: QQSendTextInput[] = [];
-  const uploads: QQUploadImageInput[] = [];
+  const uploads: QQUploadMediaInput[] = [];
   const media: QQSendMediaInput[] = [];
   const operations: string[] = [];
   const sender = new QQSender(
@@ -257,7 +260,7 @@ function senderFixture(output: Partial<BotConfig["output"]> = {}) {
         operations.push(`text:${input.sequence}`);
         return `message-${sent.length}`;
       },
-      uploadImage: async (input) => {
+      uploadMedia: async (input) => {
         uploads.push(input);
         operations.push(`upload:${input.data.toString()}`);
         return `file-${uploads.length}`;
@@ -274,10 +277,29 @@ function senderFixture(output: Partial<BotConfig["output"]> = {}) {
 }
 
 function artifact(digest: string, fileName: string): PreparedArtifact {
+  if (fileName.endsWith(".mp4")) {
+    return {
+      data: Buffer.from(digest),
+      digest,
+      fileName,
+      kind: "video",
+      mimeType: "video/mp4",
+    };
+  }
+  if (fileName.endsWith(".silk")) {
+    return {
+      data: Buffer.from(digest),
+      digest,
+      fileName,
+      kind: "voice",
+      mimeType: "audio/silk",
+    };
+  }
   return {
     data: Buffer.from(digest),
     digest,
     fileName,
+    kind: "image",
     mimeType: fileName.endsWith(".jpg") ? "image/jpeg" : "image/png",
   };
 }
