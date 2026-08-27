@@ -132,36 +132,46 @@ processes so each conversation starts against the new agent.
 
 Agent responses stream to QQ at complete Markdown block boundaries instead of
 waiting for the entire ACP turn. Small token fragments are buffered until at
-least `output.streamMinChars` characters are available, and fenced code blocks
-are kept together. QQ permits at most five passive replies to one message, so
-the bridge reserves the final reply for remaining output and marks content
-that must be truncated.
+least `output.streamMinChars` characters are available. Fenced code blocks,
+top-level list items, and nested list content are kept on valid Markdown
+boundaries. Oversized fenced blocks are closed and reopened across messages so
+each chunk remains valid. QQ permits at most five passive replies to one
+message, so the bridge reserves the final reply for remaining output, shares
+one sequence across text and artifacts, and marks content that must be
+truncated.
 
-By default, common Markdown is converted to readable plain QQ text. Native QQ
-Markdown requires separate invite-only approval for the bot, including
-approval for passive replies. Approved bots can select native rendering:
+Native QQ Markdown is the default for direct and group conversations. QQ opened
+custom Markdown in those two scenarios to all bots on April 23, 2026; no
+Markdown template or separate application is required. Replies use
+`msg_type: 2` with `markdown.content`, supporting headings, emphasis,
+strikethrough, links, public-URL images, ordered and unordered nested lists,
+quotes, and horizontal rules.
 
-```text
-/c output.markdownMode "native"
-```
+Channel Markdown remains invite-only. The bridge therefore uses an explicit
+plain-text compatibility renderer for channel replies instead of attempting a
+Markdown send and retrying, which could duplicate a message. The compatibility
+renderer removes style markers while preserving readable headings, links,
+lists, quotes, tables, and copyable code without decorative brackets or
+Unicode frames.
 
-In plain mode, LaTeX expressions delimited by `\[ ... \]`, `$$ ... $$`,
-`\(...\)`, or `$...$` are converted to readable Unicode text. Common symbols,
-fractions, roots, superscripts, subscripts, and `\text{...}` content are
-supported; fenced code remains unchanged.
+LaTeX expressions delimited by `\[ ... \]`, `$$ ... $$`, `\(...\)`, or
+`$...$` are converted to readable Unicode in both native and plain modes.
+Common symbols, fractions, roots, superscripts, subscripts, and
+`\text{...}` content are supported; fenced code remains unchanged.
 
 Output behavior can be adjusted from an administrator private chat:
 
 ```text
-/c output.markdownMode "plain"
+/c output.markdownMode "native"
 /c output.streamResponses true
 /c output.streamMinChars 400
 /c output.textChunkLimit 2000
 ```
 
-Set `output.markdownMode` to `"raw"` to retain the previous unformatted text
-behavior, or set `output.streamResponses` to `false` to wait for turn
-completion before replying.
+Set `output.markdownMode` to `"plain"` to force compatibility rendering in all
+conversations, or to `"raw"` to send unformatted text payloads. Set
+`output.streamResponses` to `false` to wait for turn completion before
+replying.
 
 ## Sending artifacts
 

@@ -11,7 +11,9 @@ import type {
 } from "./api.js";
 import {
   findStreamingSplit,
+  renderNativeMarkdownForQQ,
   renderMarkdownForQQ,
+  splitMarkdown,
   splitText,
   trimBlockStart,
 } from "./format.js";
@@ -23,7 +25,9 @@ const FINAL_REPLY_RESERVE = 1;
 const MAX_ARTIFACTS_PER_TURN = 2;
 const STREAM_LENGTH_MARGIN = 64;
 const TRUNCATION_NOTICE =
-  "[Response truncated: QQ allows at most 5 replies to one message.]";
+  "Response truncated: QQ allows at most 5 replies to one message.";
+
+type EffectiveMarkdownMode = BotConfig["output"]["markdownMode"];
 
 export interface QQMessageApi {
   sendText(input: QQSendTextInput): Promise<string | undefined>;
@@ -129,7 +133,7 @@ class BufferedQQReply implements QQReplyStream {
       fileInfo,
       replyToId: this.message.messageId,
       sequence: this.sent + 1,
-      caption: caption ? this.render(caption) : undefined,
+      caption: caption ? renderMarkdownForQQ(caption) : undefined,
     });
     this.sent++;
     this.artifactsSent++;
@@ -143,9 +147,10 @@ class BufferedQQReply implements QQReplyStream {
     const rendered = this.render(this.buffer);
     this.buffer = "";
     const chunks = capReplyChunks(
-      splitText(rendered, this.output.textChunkLimit),
+      this.split(rendered),
       MAX_PASSIVE_REPLIES - this.sent,
       this.output.textChunkLimit,
+      (text, limit) => this.split(text, limit),
     );
     await this.sendChunks(chunks);
     this.finished = true;
@@ -171,11 +176,12 @@ class BufferedQQReply implements QQReplyStream {
         this.buffer,
         this.output.streamMinChars,
         maxLength,
+        this.output.textChunkLimit,
       );
       if (splitAt === undefined) return;
 
       const raw = this.buffer.slice(0, splitAt).trim();
-      const chunks = splitText(this.render(raw), this.output.textChunkLimit);
+      const chunks = this.split(this.render(raw));
       if (chunks.length > PROGRESSIVE_REPLY_LIMIT - this.sent) return;
 
       this.buffer = trimBlockStart(this.buffer.slice(splitAt));
@@ -184,9 +190,32 @@ class BufferedQQReply implements QQReplyStream {
   }
 
   private render(text: string): string {
-    return this.output.markdownMode === "plain"
-      ? renderMarkdownForQQ(text)
-      : text.trim();
+    switch (this.effectiveMarkdownMode()) {
+      case "plain":
+        return renderMarkdownForQQ(text);
+      case "native":
+        return renderNativeMarkdownForQQ(text);
+      case "raw":
+        return text.trim();
+    }
+  }
+
+  private split(
+    text: string,
+    limit = this.output.textChunkLimit,
+  ): string[] {
+    return this.effectiveMarkdownMode() === "plain"
+      ? splitText(text, limit)
+      : splitMarkdown(text, limit);
+  }
+
+  private effectiveMarkdownMode(): EffectiveMarkdownMode {
+    return (
+      this.output.markdownMode === "native" &&
+      this.message.chatType === "channel"
+    )
+      ? "plain"
+      : this.output.markdownMode;
   }
 
   private async sendChunks(chunks: string[]): Promise<void> {
@@ -197,9 +226,7 @@ class BufferedQQReply implements QQReplyStream {
         text,
         replyToId: this.message.messageId,
         sequence: this.sent + 1,
-        markdown:
-          this.output.markdownMode === "native" &&
-          this.message.chatType !== "channel",
+        markdown: this.effectiveMarkdownMode() === "native",
       });
       this.sent++;
     }
@@ -221,6 +248,7 @@ function capReplyChunks(
   chunks: string[],
   maximum: number,
   limit: number,
+  split: (text: string, limit: number) => string[],
 ): string[] {
   if (chunks.length <= maximum) return chunks;
   if (maximum <= 0) return [];
@@ -228,7 +256,10 @@ function capReplyChunks(
   const capped = chunks.slice(0, maximum);
   const last = capped[maximum - 1]!;
   const contentLimit = Math.max(0, limit - TRUNCATION_NOTICE.length - 2);
+  const safePrefix = split(last, contentLimit)[0] ?? "";
   capped[maximum - 1] =
-    `${last.slice(0, contentLimit).trimEnd()}\n\n${TRUNCATION_NOTICE}`;
+    safePrefix
+      ? `${safePrefix.trimEnd()}\n\n${TRUNCATION_NOTICE}`
+      : TRUNCATION_NOTICE;
   return capped;
 }

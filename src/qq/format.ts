@@ -7,31 +7,32 @@ export function renderMarkdownForQQ(markdown: string): string {
 
   for (let index = 0; index < lines.length; index++) {
     const line = lines[index]!;
-    const fenceMatch = line.match(/^\s{0,3}(`{3,}|~{3,})\s*([^`]*)$/);
+    const fenceMatch = line.match(/^\s{0,3}(`{3,}|~{3,})(.*)$/);
     if (fenceMatch) {
       const marker = fenceMatch[1]!;
       if (!fence) {
         fence = { marker: marker[0]!, length: marker.length };
         const language = fenceMatch[2]!.trim();
-        rendered.push(language ? `[Code: ${language}]` : "[Code]");
+        rendered.push(language ? `Code (${language}):` : "Code:");
       } else if (
         marker[0] === fence.marker &&
-        marker.length >= fence.length
+        marker.length >= fence.length &&
+        !fenceMatch[2]!.trim()
       ) {
         fence = undefined;
       } else {
-        rendered.push(`  ${line}`);
+        rendered.push(line);
       }
       continue;
     }
     if (fence) {
-      rendered.push(line ? `  ${line}` : "");
+      rendered.push(line);
       continue;
     }
 
     if (displayMath) {
       if (line.trim() === displayMath.close) {
-        rendered.push("[Formula]", renderLatexForQQ(displayMath.lines.join("\n")));
+        rendered.push("Formula:", renderLatexForQQ(displayMath.lines.join("\n")));
         displayMath = undefined;
       } else {
         displayMath.lines.push(line);
@@ -41,7 +42,7 @@ export function renderMarkdownForQQ(markdown: string): string {
 
     const completeFormula = readCompleteDisplayFormula(line);
     if (completeFormula !== undefined) {
-      rendered.push("[Formula]", renderLatexForQQ(completeFormula));
+      rendered.push("Formula:", renderLatexForQQ(completeFormula));
       continue;
     }
     const formulaClose = displayFormulaClose(line);
@@ -66,7 +67,7 @@ export function renderMarkdownForQQ(markdown: string): string {
 
     const heading = line.match(/^\s{0,3}#{1,6}\s+(.+?)\s*#*\s*$/);
     if (heading) {
-      rendered.push(`[${renderInlineMarkdown(heading[1]!)}]`);
+      rendered.push(renderInlineMarkdown(heading[1]!));
       continue;
     }
     if (/^\s{0,3}(?:-{3,}|\*{3,}|_{3,})\s*$/.test(line)) {
@@ -76,7 +77,7 @@ export function renderMarkdownForQQ(markdown: string): string {
 
     const quote = line.match(/^(\s*)>\s?(.*)$/);
     if (quote) {
-      rendered.push(`${quote[1]}| ${renderInlineMarkdown(quote[2]!)}`);
+      rendered.push(`${quote[1]}> ${renderInlineMarkdown(quote[2]!)}`);
       continue;
     }
 
@@ -90,33 +91,107 @@ export function renderMarkdownForQQ(markdown: string): string {
   }
 
   if (displayMath) {
-    rendered.push("[Formula]", renderLatexForQQ(displayMath.lines.join("\n")));
+    rendered.push("Formula:", renderLatexForQQ(displayMath.lines.join("\n")));
   }
 
   return rendered.join("\n").replace(/\n{3,}/g, "\n\n").trim();
 }
 
+export function renderNativeMarkdownForQQ(markdown: string): string {
+  const lines = markdown.replace(/\r\n?/g, "\n").trim().split("\n");
+  const rendered: string[] = [];
+  let fence: { marker: string; length: number } | undefined;
+  let displayMath: { close: "\\]" | "$$"; lines: string[] } | undefined;
+
+  for (const line of lines) {
+    const fenceMatch = line.match(/^\s{0,3}(`{3,}|~{3,})(.*)$/);
+    if (fenceMatch) {
+      const marker = fenceMatch[1]!;
+      if (!fence) {
+        fence = { marker: marker[0]!, length: marker.length };
+      } else if (
+        marker[0] === fence.marker &&
+        marker.length >= fence.length &&
+        !fenceMatch[2]!.trim()
+      ) {
+        fence = undefined;
+      }
+      rendered.push(line);
+      continue;
+    }
+    if (fence) {
+      rendered.push(line);
+      continue;
+    }
+
+    if (displayMath) {
+      if (line.trim() === displayMath.close) {
+        rendered.push(renderLatexForQQ(displayMath.lines.join("\n")));
+        displayMath = undefined;
+      } else {
+        displayMath.lines.push(line);
+      }
+      continue;
+    }
+
+    const completeFormula = readCompleteDisplayFormula(line);
+    if (completeFormula !== undefined) {
+      rendered.push(renderLatexForQQ(completeFormula));
+      continue;
+    }
+    const formulaClose = displayFormulaClose(line);
+    if (formulaClose) {
+      displayMath = { close: formulaClose, lines: [] };
+      continue;
+    }
+
+    rendered.push(renderInlineLatexInMarkdown(line));
+  }
+
+  if (displayMath) {
+    rendered.push(
+      displayMath.close === "\\]" ? "\\[" : "$$",
+      ...displayMath.lines,
+    );
+  }
+  return rendered.join("\n").trim();
+}
+
 export function findStreamingSplit(
   text: string,
   minimum: number,
-  maximum: number,
+  preferredMaximum: number,
+  hardMaximum = preferredMaximum,
 ): number | undefined {
-  if (minimum > maximum || text.length < minimum) return undefined;
+  if (
+    minimum > preferredMaximum ||
+    preferredMaximum > hardMaximum ||
+    text.length < minimum
+  ) {
+    return undefined;
+  }
   const { blockBreaks, lineBreaks, inProtectedBlockAtMaximum } =
-    markdownBreaks(text, maximum);
+    markdownBreaks(text, preferredMaximum);
   const blockBreak = blockBreaks.find(
-    (position) => position >= minimum && position <= maximum,
+    (position) => position >= minimum && position <= preferredMaximum,
   );
   if (blockBreak !== undefined) return blockBreak;
-  if (text.length < maximum || inProtectedBlockAtMaximum) return undefined;
+
+  const extendedBlockBreak = blockBreaks.find(
+    (position) => position > preferredMaximum && position <= hardMaximum,
+  );
+  if (extendedBlockBreak !== undefined) return extendedBlockBreak;
+  if (text.length < preferredMaximum || inProtectedBlockAtMaximum) {
+    return undefined;
+  }
 
   const lineBreak = lineBreaks
-    .filter((position) => position >= minimum && position <= maximum)
+    .filter((position) => position >= minimum && position <= preferredMaximum)
     .at(-1);
   if (lineBreak !== undefined) return lineBreak;
 
-  const space = text.lastIndexOf(" ", maximum);
-  return space >= minimum ? space + 1 : maximum;
+  const space = text.lastIndexOf(" ", preferredMaximum);
+  return space >= minimum ? space + 1 : preferredMaximum;
 }
 
 export function trimBlockStart(text: string): string {
@@ -162,8 +237,200 @@ export function splitText(text: string, limit: number): string[] {
   return chunks;
 }
 
+export function splitMarkdown(markdown: string, limit: number): string[] {
+  if (!Number.isInteger(limit) || limit <= 0) {
+    throw new RangeError("Markdown chunk limit must be a positive integer");
+  }
+  const text = markdown.replace(/\r\n?/g, "\n").trim();
+  if (!text) return [];
+  return splitMarkdownSection(text, limit);
+}
+
 export function renderLatexForQQ(latex: string): string {
   return normalizeMathText(parseLatex(latex, 0).value);
+}
+
+function splitMarkdownSection(text: string, limit: number): string[] {
+  if (text.length <= limit) return [text];
+
+  const leadingFence = readLeadingFencedBlock(text);
+  if (leadingFence && leadingFence.block.length > limit) {
+    const rest = trimBlockStart(text.slice(leadingFence.block.length));
+    return [
+      ...splitFencedBlock(leadingFence, limit),
+      ...(rest ? splitMarkdownSection(rest, limit) : []),
+    ];
+  }
+
+  const { blockBreaks } = markdownBreaks(text, limit);
+  const splitAt = blockBreaks
+    .filter((position) => position > 0 && position <= limit)
+    .at(-1);
+  if (splitAt !== undefined) {
+    const left = text.slice(0, splitAt).trimEnd();
+    const right = trimBlockStart(text.slice(splitAt));
+    return [
+      ...(left ? [left] : []),
+      ...(right ? splitMarkdownSection(right, limit) : []),
+    ];
+  }
+
+  const boundary = findMarkdownTextBoundary(text, limit);
+  const left = text.slice(0, boundary.position).trimEnd();
+  let right =
+    boundary.kind === "newline"
+      ? text.slice(boundary.position + 1).replace(/^\n+/, "")
+      : boundary.kind === "space"
+        ? text.slice(boundary.position + 1).trimStart()
+        : text.slice(boundary.position);
+  if (boundary.kind !== "newline") {
+    right = `${markdownContinuationPrefix(text, boundary.position)}${right}`;
+  }
+  return [
+    ...(left ? [left] : []),
+    ...(right ? splitMarkdownSection(right, limit) : []),
+  ];
+}
+
+interface LeadingFencedBlock {
+  block: string;
+  opening: string;
+  closing: string;
+  body: string;
+}
+
+function readLeadingFencedBlock(text: string): LeadingFencedBlock | undefined {
+  const lines = text.split("\n");
+  const openingMatch = lines[0]?.match(/^(\s{0,3})(`{3,}|~{3,})[^\n]*$/);
+  if (!openingMatch) return undefined;
+
+  const marker = openingMatch[2]!;
+  const closingPattern = new RegExp(
+    `^\\s{0,3}${marker[0] === "`" ? "`" : "~"}{${marker.length},}\\s*$`,
+  );
+  const closingIndex = lines.findIndex(
+    (line, index) => index > 0 && closingPattern.test(line),
+  );
+  const blockLines =
+    closingIndex === -1 ? lines : lines.slice(0, closingIndex + 1);
+  const block = blockLines.join("\n");
+  const bodyLines =
+    closingIndex === -1
+      ? blockLines.slice(1)
+      : blockLines.slice(1, -1);
+  return {
+    block,
+    opening: blockLines[0]!,
+    closing: `${openingMatch[1]}${marker}`,
+    body: bodyLines.join("\n"),
+  };
+}
+
+function splitFencedBlock(
+  fence: LeadingFencedBlock,
+  limit: number,
+): string[] {
+  const minimumOverhead = fence.closing.length + 2;
+  const opening =
+    fence.opening.length + minimumOverhead < limit
+      ? fence.opening
+      : fence.closing;
+  const bodyLimit = limit - opening.length - fence.closing.length - 2;
+  if (bodyLimit <= 0) {
+    throw new RangeError("Markdown chunk limit is too small for a code fence");
+  }
+
+  const bodyParts = splitVerbatim(fence.body, bodyLimit);
+  return bodyParts.map((body) =>
+    body
+      ? `${opening}\n${body}\n${fence.closing}`
+      : `${opening}\n${fence.closing}`);
+}
+
+function splitVerbatim(text: string, limit: number): string[] {
+  if (text.length <= limit) return [text];
+  const parts: string[] = [];
+  let remaining = text;
+  while (remaining.length > limit) {
+    let splitAt = remaining.lastIndexOf("\n", limit);
+    let skip = 1;
+    if (splitAt < limit / 4) {
+      splitAt = safeCodeUnitBoundary(remaining, limit);
+      skip = 0;
+    }
+    parts.push(remaining.slice(0, splitAt));
+    remaining = remaining.slice(splitAt + skip);
+  }
+  parts.push(remaining);
+  return parts;
+}
+
+function findMarkdownTextBoundary(
+  text: string,
+  limit: number,
+): { position: number; kind: "newline" | "space" | "hard" } {
+  const protectedRanges = inlineMarkdownRanges(text);
+  for (let index = Math.min(limit, text.length - 1); index > 0; index--) {
+    if (isProtectedIndex(index, protectedRanges)) continue;
+    if (
+      text[index] === "\n" &&
+      !/^(?: {4,}|\t)/.test(text.slice(index + 1))
+    ) {
+      return { position: index, kind: "newline" };
+    }
+  }
+  for (let index = Math.min(limit, text.length - 1); index > 0; index--) {
+    if (text[index] === " " && !isProtectedIndex(index, protectedRanges)) {
+      return { position: index, kind: "space" };
+    }
+  }
+  return {
+    position: safeCodeUnitBoundary(text, limit),
+    kind: "hard",
+  };
+}
+
+function inlineMarkdownRanges(text: string): Array<[number, number]> {
+  const ranges: Array<[number, number]> = [];
+  const patterns = [
+    /`+[^`\n]+`+/g,
+    /!?\[[^\]\n]*\]\([^\)\n]+\)/g,
+    /<(?:https?:\/\/|mailto:)[^>\n]+>/g,
+  ];
+  for (const pattern of patterns) {
+    for (const match of text.matchAll(pattern)) {
+      ranges.push([match.index, match.index + match[0].length]);
+    }
+  }
+  return ranges;
+}
+
+function isProtectedIndex(
+  index: number,
+  ranges: Array<[number, number]>,
+): boolean {
+  return ranges.some(([start, end]) => index > start && index < end);
+}
+
+function markdownContinuationPrefix(text: string, position: number): string {
+  const lineStart = text.lastIndexOf("\n", position - 1) + 1;
+  const line = text.slice(lineStart, position);
+  const list = line.match(/^\s*((?:[-+*]|\d+[.)])\s+)/);
+  if (list) return list[1]!;
+  const quote = line.match(/^\s*(>\s*)/);
+  if (quote) return quote[1]!;
+  return "";
+}
+
+function safeCodeUnitBoundary(text: string, limit: number): number {
+  let boundary = Math.min(limit, text.length);
+  if (
+    /[\uD800-\uDBFF]/.test(text[boundary - 1] ?? "") &&
+    /[\uDC00-\uDFFF]/.test(text[boundary] ?? "")
+  ) {
+    boundary--;
+  }
+  return Math.max(1, boundary);
 }
 
 function renderInlineMarkdown(text: string): string {
@@ -189,7 +456,7 @@ function renderInlineMarkdown(text: string): string {
     .replace(
       /!\[([^\]]*)\]\((\S+?)(?:\s+["'][^"']*["'])?\)/g,
       (_match, alt: string, url: string) =>
-        alt ? `[Image: ${alt}] ${url}` : `[Image] ${url}`,
+        alt ? `Image: ${alt} (${url})` : `Image: ${url}`,
     )
     .replace(/\[([^\]]+)\]\((\S+?)(?:\s+["'][^"']*["'])?\)/g, "$1 ($2)")
     .replace(/<((?:https?:\/\/|mailto:)[^>]+)>/g, "$1")
@@ -205,7 +472,25 @@ function renderInlineMarkdown(text: string): string {
     .replace(/\\\$/g, "$");
 
   return rendered.replace(/\u0000CODE(\d+)\u0000/g, (_match, index: string) =>
-    `[${codeSpans[Number(index)] ?? ""}]`);
+    codeSpans[Number(index)] ?? "");
+}
+
+function renderInlineLatexInMarkdown(text: string): string {
+  const codeSpans: string[] = [];
+  let rendered = text.replace(/(`+)(.+?)\1/g, (match) => {
+    const index = codeSpans.push(match) - 1;
+    return `\u0000CODE${index}\u0000`;
+  });
+  rendered = rendered
+    .replace(/\\\((.+?)\\\)/g, (_match, formula: string) =>
+      renderLatexForQQ(formula))
+    .replace(
+      /(?<![\\$])\$(?![$\s])(\S(?:[^$\n]*?\S)?)(?<!\\)\$(?![$\d])/g,
+      (_match, formula: string) => renderLatexForQQ(formula),
+    )
+    .replace(/\\\$/g, "$");
+  return rendered.replace(/\u0000CODE(\d+)\u0000/g, (_match, index: string) =>
+    codeSpans[Number(index)] ?? "");
 }
 
 interface LatexParseResult {
@@ -687,6 +972,7 @@ function markdownBreaks(
   const lineBreaks: number[] = [];
   let fence: { marker: string; length: number } | undefined;
   let displayMath: "\\]" | "$$" | undefined;
+  let inListBlock = false;
   let offset = 0;
   let inProtectedBlockAtMaximum = false;
 
@@ -695,29 +981,71 @@ function markdownBreaks(
     const lineStart = offset;
     const line = part.endsWith("\n") ? part.slice(0, -1) : part;
     const wasProtected = Boolean(fence || displayMath);
-    const marker = line.match(/^\s{0,3}(`{3,}|~{3,})/)?.[1];
+    const fenceMatch = line.match(/^\s{0,3}(`{3,}|~{3,})(.*)$/);
+    const marker = fenceMatch?.[1];
+    let closedProtectedBlock = false;
 
     if (!displayMath && marker) {
       if (!fence) {
+        if (lineStart > 0) blockBreaks.push(lineStart);
         fence = { marker: marker[0]!, length: marker.length };
-      } else if (marker[0] === fence.marker && marker.length >= fence.length) {
+        inListBlock = false;
+      } else if (
+        marker[0] === fence.marker &&
+        marker.length >= fence.length &&
+        !fenceMatch[2]!.trim()
+      ) {
         fence = undefined;
+        closedProtectedBlock = true;
       }
     }
     if (!fence) {
       if (displayMath && line.trim() === displayMath) {
         displayMath = undefined;
+        closedProtectedBlock = true;
       } else if (!displayMath) {
         displayMath = displayFormulaClose(line);
+        if (displayMath) {
+          if (lineStart > 0) blockBreaks.push(lineStart);
+          inListBlock = false;
+        }
+      }
+    }
+
+    const topLevelListItem =
+      !wasProtected &&
+      !fence &&
+      !displayMath &&
+      /^\s{0,3}(?:[-+*]|\d+[.)])\s+/.test(line);
+    if (topLevelListItem) {
+      if (lineStart > 0) blockBreaks.push(lineStart);
+      inListBlock = true;
+    } else if (
+      !wasProtected &&
+      !fence &&
+      !displayMath
+    ) {
+      if (!line.trim()) {
+        inListBlock = false;
+      } else if (!inListBlock || !/^(?: {2,}|\t)/.test(line)) {
+        inListBlock = false;
       }
     }
 
     offset += part.length;
     if (lineStart < maximum && offset >= maximum) {
       inProtectedBlockAtMaximum =
-        wasProtected || Boolean(fence || displayMath);
+        wasProtected || Boolean(fence || displayMath || inListBlock);
     }
-    if (!fence && !displayMath && part.endsWith("\n")) lineBreaks.push(offset);
+    if (
+      !fence &&
+      !displayMath &&
+      !inListBlock &&
+      part.endsWith("\n")
+    ) {
+      lineBreaks.push(offset);
+    }
+    if (closedProtectedBlock) blockBreaks.push(offset);
     if (
       !wasProtected &&
       !fence &&
@@ -737,5 +1065,9 @@ function markdownBreaks(
     }
   }
 
-  return { blockBreaks, lineBreaks, inProtectedBlockAtMaximum };
+  return {
+    blockBreaks: [...new Set(blockBreaks)].sort((left, right) => left - right),
+    lineBreaks: [...new Set(lineBreaks)].sort((left, right) => left - right),
+    inProtectedBlockAtMaximum,
+  };
 }

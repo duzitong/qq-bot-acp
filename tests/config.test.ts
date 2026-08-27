@@ -40,6 +40,7 @@ test("configuration values support JSON and validated dotted updates", async () 
 
 test("legacy configurations receive output formatting defaults", async () => {
   const { config } = await fixture();
+  assert.equal(config.output.markdownMode, "native");
   const legacy = {
     ...config,
     output: {
@@ -48,7 +49,9 @@ test("legacy configurations receive output formatting defaults", async () => {
     },
   };
 
-  assert.deepEqual(parseConfig(legacy).output, config.output);
+  const parsed = parseConfig(legacy);
+  assert.deepEqual(parsed.output, config.output);
+  assert.equal(parsed.output.markdownMode, "native");
 });
 
 test("admin CLI bootstrap cannot replace an existing administrator", async () => {
