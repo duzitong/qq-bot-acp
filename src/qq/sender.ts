@@ -31,7 +31,7 @@ const STREAM_LENGTH_MARGIN = 64;
 const STREAM_UPDATE_INTERVAL_MS = 300;
 const STREAM_DIAGNOSTIC_INTERVAL_MS = 1_000;
 const STREAM_EMPTY_PLACEHOLDER = "…";
-const STREAM_COMPLETION_MARKER = "\n\n✓ Complete";
+const STREAM_COMPLETION_MARKER = "\n\n🔚";
 const TRUNCATION_NOTICE =
   "Response truncated: QQ's passive reply limit was reached.";
 let nextStreamTrace = 1;

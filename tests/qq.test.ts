@@ -208,7 +208,7 @@ test("direct replies use one official QQ stream from first update through comple
         streamMessageId: "stream-inbound",
       },
       {
-        text: "# Overview\n\nFirst answer.\n\n✓ Complete",
+        text: "# Overview\n\nFirst answer.\n\n🔚",
         replyToId: "inbound",
         sequence: 1,
         index: 2,
@@ -267,7 +267,7 @@ test("streaming diagnostic bypasses ACP and emits visible timed frames", async (
   assert.match(streams[0]!.text, /1\. First generating frame accepted\.$/);
   assert.match(streams[1]!.text, /2\. Second generating frame accepted/);
   assert.match(streams[2]!.text, /3\. Third generating frame accepted/);
-  assert.match(streams[3]!.text, /3\. Third generating frame accepted[\s\S]*✓ Complete$/);
+  assert.match(streams[3]!.text, /3\. Third generating frame accepted[\s\S]*🔚$/);
   assert.equal(
     logs.filter((entry) => entry.includes("frame accepted")).length,
     4,
@@ -296,7 +296,7 @@ test("remain_msg_len is pending telemetry and never stops a QQ stream", async ()
       .map((entry) => entry.match(/pending=(\d+)$/)?.[1]),
     ["0", "17", "4", "0"],
   );
-  assert.match(streams.at(-1)!.text, /✓ Complete$/);
+  assert.match(streams.at(-1)!.text, /🔚$/);
 });
 
 test("direct streaming preserves Markdown and LaTeX across ACP delta boundaries", async () => {
@@ -739,7 +739,7 @@ test("plain compatibility rendering waits for a prefix-safe final frame", async 
   assert.equal(streams[0]!.contentType, "text");
   assert.deepEqual(streams.map((frame) => frame.state), [1, 10]);
   assert.equal(streams[0]!.text, "bold and code");
-  assert.equal(streams[1]!.text, "bold and code\n\n✓ Complete");
+  assert.equal(streams[1]!.text, "bold and code\n\n🔚");
 });
 
 test("QQ artifact uploads and media payloads use rich-media messages", () => {

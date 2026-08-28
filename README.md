@@ -136,7 +136,7 @@ API. Each inbound QQ message owns one independent response stream: every
 update retains that message's original `msg_id` and `msg_seq`, then reuses the
 `stream_msg_id` returned by QQ's first frame. ACP deltas are accumulated and
 sent as throttled full-document `replace` updates, and the final update sets
-`input_state: 10` with a small completion marker in the same message. Fenced
+`input_state: 10` with a single `🔚` marker in the same message. Fenced
 code and explicit LaTeX that span ACP deltas are held until structurally
 complete so an update never rewrites a prefix QQ may already have displayed.
 
