@@ -81,6 +81,10 @@ test("artifact files are contained, typed, and size-limited", async () => {
         { kind: "voice", mimeType: "audio/ogg" },
       ],
     );
+    const text = await prepareArtifact(root, "notes.txt");
+    assert.equal(text.kind, "file");
+    assert.equal(text.mimeType, "application/octet-stream");
+    assert.equal(text.data.toString(), "not an image");
     await assert.rejects(
       prepareArtifact(root, outside),
       /inside the agent working directory/,
@@ -89,7 +93,6 @@ test("artifact files are contained, typed, and size-limited", async () => {
       prepareArtifact(root, "escaped.png"),
       /inside the agent working directory/,
     );
-    await assert.rejects(prepareArtifact(root, "notes.txt"), /Unsupported artifact type/);
     await assert.rejects(prepareArtifact(root, "oversized.png"), /20 MiB upload limit/);
   } finally {
     await fs.rm(parent, { recursive: true, force: true });
@@ -103,7 +106,7 @@ test("HTTP MCP exposes explicit, token-isolated artifact delivery", async () => 
   await fs.mkdir(firstRoot);
   await fs.mkdir(secondRoot);
   await fs.writeFile(path.join(firstRoot, "video.mp4"), MP4);
-  await fs.writeFile(path.join(secondRoot, "voice.silk"), "#!SILK_V3voice");
+  await fs.writeFile(path.join(secondRoot, "notes.txt"), "ordinary file");
 
   const logs: string[] = [];
   const broker = new ArtifactBroker((message) => logs.push(message));
@@ -134,7 +137,7 @@ test("HTTP MCP exposes explicit, token-isolated artifact delivery", async () => 
     });
     secondSession.beginTurn(async (artifact) => {
       secondDeliveries.push(artifact);
-      assert.equal(artifact.kind, "voice");
+      assert.equal(artifact.kind, "file");
       return { alreadySent: false };
     });
 
@@ -149,14 +152,14 @@ test("HTTP MCP exposes explicit, token-isolated artifact delivery", async () => 
 
     const escaped = await firstClient.client.callTool({
       name: "send_artifact",
-      arguments: { path: "../second/voice.silk" },
+      arguments: { path: "../second/notes.txt" },
     });
     assert.equal(escaped.isError, true);
     assert.match(textResult(escaped), /inside the agent working directory/);
 
     await secondClient.client.callTool({
       name: "send_artifact",
-      arguments: { path: "voice.silk" },
+      arguments: { path: "notes.txt" },
     });
     assert.equal(firstDeliveries.length, 1);
     assert.equal(secondDeliveries.length, 1);

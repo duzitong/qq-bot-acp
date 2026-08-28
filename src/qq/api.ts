@@ -19,13 +19,14 @@ export interface QQSendTextInput {
   markdown?: boolean;
 }
 
-export type QQMediaFileType = 1 | 2 | 3;
+export type QQMediaFileType = 1 | 2 | 3 | 4;
 
 export interface QQUploadMediaInput {
   chatType: "direct" | "group";
   targetId: string;
   data: Buffer;
   fileType: QQMediaFileType;
+  fileName?: string;
 }
 
 export interface QQSendMediaInput {
@@ -119,7 +120,9 @@ export class QQApi {
     const response = await this.request(endpoint, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify(buildMediaUploadBody(input.data, input.fileType)),
+      body: JSON.stringify(
+        buildMediaUploadBody(input.data, input.fileType, input.fileName),
+      ),
     });
     const result = (await response.json().catch(() => ({}))) as {
       file_info?: string;
@@ -214,12 +217,20 @@ export function buildTextMessageBody(input: QQSendTextInput): Record<string, unk
 export function buildMediaUploadBody(
   data: Buffer,
   fileType: QQMediaFileType,
+  fileName?: string,
 ): Record<string, unknown> {
-  return {
+  const body: Record<string, unknown> = {
     file_type: fileType,
     file_data: data.toString("base64"),
     srv_send_msg: false,
   };
+  if (fileType === 4) {
+    if (!fileName?.trim()) {
+      throw new Error("QQ ordinary file uploads require a file name");
+    }
+    body.file_name = sanitizeQQFileName(fileName);
+  }
+  return body;
 }
 
 export function buildMediaMessageBody(input: QQSendMediaInput): Record<string, unknown> {
@@ -269,4 +280,12 @@ export function parseStreamMessageResponse(
         ? undefined
         : result.remain_msg_len as number,
   };
+}
+
+function sanitizeQQFileName(fileName: string): string {
+  const sanitized = fileName
+    .replace(/[\\/:*?"<>|\u0000-\u001f\u007f]/g, "_")
+    .replace(/\s+/g, " ")
+    .trim();
+  return sanitized || "file";
 }

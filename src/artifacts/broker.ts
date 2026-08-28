@@ -174,8 +174,9 @@ function createArtifactMcpServer(
     {
       title: "Send artifact to QQ",
       description:
-        "Send a PNG/JPEG image, MP4 video, or SILK/MP3/WAV/OGG voice " +
-        "file to the current QQ conversation. " +
+        "Send a regular file to the current QQ conversation. PNG/JPEG images, " +
+        "MP4 video, and SILK/MP3/WAV/OGG voice files render as native media; " +
+        "other files are delivered as ordinary QQ files. " +
         "Call this only when the user should receive the artifact. " +
         "The path may be absolute or relative to the session working directory.",
       inputSchema: {

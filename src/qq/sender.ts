@@ -201,6 +201,7 @@ class BufferedQQReply implements QQReplyStream {
       targetId: this.message.targetId,
       data: artifact.data,
       fileType: qqMediaFileType(artifact.kind),
+      fileName: artifact.fileName,
     });
     await this.api.sendMedia({
       chatType: this.message.chatType,
@@ -437,6 +438,8 @@ function qqMediaFileType(kind: ArtifactKind): QQMediaFileType {
       return 2;
     case "voice":
       return 3;
+    case "file":
+      return 4;
   }
 }
 

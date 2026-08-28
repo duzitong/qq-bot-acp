@@ -4,7 +4,7 @@ import path from "node:path";
 
 export const MAX_ARTIFACT_BYTES = 20 * 1024 * 1024;
 
-export type ArtifactKind = "image" | "video" | "voice";
+export type ArtifactKind = "image" | "video" | "voice" | "file";
 
 export type ArtifactMimeType =
   | "image/png"
@@ -13,7 +13,8 @@ export type ArtifactMimeType =
   | "audio/silk"
   | "audio/mpeg"
   | "audio/wav"
-  | "audio/ogg";
+  | "audio/ogg"
+  | "application/octet-stream";
 
 export interface PreparedArtifact {
   data: Buffer;
@@ -59,13 +60,10 @@ export async function prepareArtifact(
         `Artifact exceeds the ${MAX_ARTIFACT_BYTES / 1024 / 1024} MiB upload limit`,
       );
     }
-    const mediaType = detectArtifactType(data);
-    if (!mediaType) {
-      throw new Error(
-        "Unsupported artifact type; send_artifact accepts PNG/JPEG images, " +
-        "MP4 video, and SILK/MP3/WAV/OGG voice audio",
-      );
-    }
+    const mediaType = detectArtifactType(data) ?? {
+      kind: "file" as const,
+      mimeType: "application/octet-stream" as const,
+    };
     return {
       data,
       digest: crypto.createHash("sha256").update(data).digest("hex"),

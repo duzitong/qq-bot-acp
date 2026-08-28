@@ -751,6 +751,23 @@ test("QQ artifact uploads and media payloads use rich-media messages", () => {
     });
   }
   assert.deepEqual(
+    buildMediaUploadBody(
+      Buffer.from([0, 1, 2]),
+      4,
+      "report: 2026.pdf",
+    ),
+    {
+      file_type: 4,
+      file_data: "AAEC",
+      file_name: "report_ 2026.pdf",
+      srv_send_msg: false,
+    },
+  );
+  assert.throws(
+    () => buildMediaUploadBody(Buffer.from([0, 1, 2]), 4),
+    /require a file name/,
+  );
+  assert.deepEqual(
     buildMediaMessageBody({
       chatType: "group",
       targetId: "group",
@@ -767,6 +784,19 @@ test("QQ artifact uploads and media payloads use rich-media messages", () => {
       msg_seq: 3,
     },
   );
+});
+
+test("ordinary artifacts preserve their file name and use QQ file uploads", async () => {
+  const { sender, uploads, media } = senderFixture({ streamResponses: false });
+  const reply = sender.createReply(inboundMessage());
+
+  await reply.sendArtifact(artifact("document", "report.pdf"), "Final report");
+  await reply.finish();
+
+  assert.equal(uploads.length, 1);
+  assert.equal(uploads[0]?.fileType, 4);
+  assert.equal(uploads[0]?.fileName, "report.pdf");
+  assert.equal(media[0]?.caption, "Final report");
 });
 
 test("artifacts share reply sequencing and are deduplicated per turn", async () => {
@@ -884,6 +914,15 @@ function artifact(digest: string, fileName: string): PreparedArtifact {
       fileName,
       kind: "voice",
       mimeType: "audio/silk",
+    };
+  }
+  if (fileName.endsWith(".pdf")) {
+    return {
+      data: Buffer.from(digest),
+      digest,
+      fileName,
+      kind: "file",
+      mimeType: "application/octet-stream",
     };
   }
   return {
