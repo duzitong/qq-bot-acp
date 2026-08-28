@@ -150,9 +150,11 @@ artifacts share that per-message sequence budget without rebinding a response
 to a newer inbound message.
 
 The bridge does not split a direct stream at the legacy 2,000-character chunk
-size. It uses QQ's returned `remain_msg_len` as the authoritative capacity,
-reserves room for the final marker, and adds a truncation notice only when that
-reported capacity is actually exhausted.
+size. QQ's `remain_msg_len` reports characters still pending for server-side
+delivery, not writable capacity: a live response commonly returns zero after
+the submitted text has been consumed. The bridge records it as queue telemetry
+but never truncates or stops a stream because of it. Any actual platform
+length rejection is surfaced explicitly.
 
 Native QQ Markdown is the default for direct and group conversations. QQ opened
 custom Markdown in those two scenarios to all bots on April 23, 2026; no
@@ -245,7 +247,7 @@ An administrator can send `/test-streaming` in a direct chat to test QQ's
 official streaming transport without starting an ACP turn. The diagnostic
 forces three generating frames one second apart, then sends the final
 `input_state: 10` frame. Service logs record only the per-turn trace, frame
-index/state, character count, and QQ-reported remaining capacity; message
+index/state, character count, and QQ-reported pending character count; message
 content and full message IDs are not logged.
 
 ## Agent examples

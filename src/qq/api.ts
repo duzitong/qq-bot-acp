@@ -50,7 +50,7 @@ export interface QQSendStreamInput {
 
 export interface QQStreamMessageResponse {
   id: string;
-  remainMessageLength?: number;
+  pendingCharacters?: number;
 }
 
 export class QQApi {
@@ -264,7 +264,7 @@ export function parseStreamMessageResponse(
   }
   return {
     id: result.id,
-    remainMessageLength:
+    pendingCharacters:
       result.remain_msg_len === undefined
         ? undefined
         : result.remain_msg_len as number,

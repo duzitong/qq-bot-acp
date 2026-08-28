@@ -280,6 +280,25 @@ test("streaming diagnostic bypasses ACP and emits visible timed frames", async (
   );
 });
 
+test("remain_msg_len is pending telemetry and never stops a QQ stream", async () => {
+  const { sender, streams, logs } = senderFixture({}, async (input) => ({
+    id: `stream-${input.replyToId}`,
+    pendingCharacters: [0, 17, 4, 0][input.index],
+  }));
+
+  await sender.runStreamingDiagnostic(inboundMessage(), async () => {});
+
+  assert.deepEqual(streams.map(({ index }) => index), [0, 1, 2, 3]);
+  assert.deepEqual(streams.map(({ state }) => state), [1, 1, 1, 10]);
+  assert.deepEqual(
+    logs
+      .filter((entry) => entry.includes("frame accepted"))
+      .map((entry) => entry.match(/pending=(\d+)$/)?.[1]),
+    ["0", "17", "4", "0"],
+  );
+  assert.match(streams.at(-1)!.text, /✓ Complete$/);
+});
+
 test("direct streaming preserves Markdown and LaTeX across ACP delta boundaries", async () => {
   const { sender, streams } = senderFixture();
   const reply = sender.createReply(inboundMessage());
@@ -509,7 +528,7 @@ test("QQ stream request bodies and responses follow the official contract", () =
   );
   assert.deepEqual(
     parseStreamMessageResponse({ id: "stream-1", remain_msg_len: 1234 }),
-    { id: "stream-1", remainMessageLength: 1234 },
+    { id: "stream-1", pendingCharacters: 1234 },
   );
   assert.throws(
     () => parseStreamMessageResponse({ remain_msg_len: 1234 }),
@@ -554,7 +573,7 @@ test("QQ API posts stream frames to the direct stream endpoint", async () => {
     });
     assert.deepEqual(response, {
       id: "stream-1",
-      remainMessageLength: 999,
+      pendingCharacters: 999,
     });
     assert.equal(
       requests[0]?.url,
@@ -680,118 +699,28 @@ test("stream update failures surface without sending a fallback reply", async ()
   assert.doesNotMatch(logs.at(-1)!, /sensitive response/);
 });
 
-test("stream truncates only after QQ reports true length exhaustion", async () => {
-  const totalCapacity = 100;
-  const { sender, streams } = senderFixture({}, async (input) => ({
-    id: `stream-${input.replyToId}`,
-    remainMessageLength: Math.max(
-      0,
-      totalCapacity - Array.from(input.text).length,
-    ),
-  }));
+test("an explicit QQ length rejection surfaces without local truncation", async () => {
+  const { sender, sent, streams, logs } = senderFixture({}, async (input) => {
+    if (input.index === 1) {
+      throw new Error("QQ stream send failed (400; code 40054007)");
+    }
+    return {
+      id: `stream-${input.replyToId}`,
+      pendingCharacters: 0,
+    };
+  });
   const reply = sender.createReply(inboundMessage());
 
   await reply.write("start");
   await waitForStreamUpdate();
   await reply.write("x".repeat(200));
   await waitForStreamUpdate();
-  await reply.finish();
 
-  const final = streams.at(-1)!;
-  assert.equal(final.state, 10);
-  assert.ok(Array.from(final.text).length <= totalCapacity);
-  assert.match(final.text, /Response truncated/);
-  assert.match(final.text, /✓ Complete/);
-  assert.ok(streams.every((frame) => frame.sequence === 1));
-});
-
-test("stream does not truncate content that fits with its completion marker", async () => {
-  const totalCapacity = 105;
-  const { sender, streams } = senderFixture({}, async (input) => ({
-    id: `stream-${input.replyToId}`,
-    remainMessageLength: Math.max(
-      0,
-      totalCapacity - Array.from(input.text).length,
-    ),
-  }));
-  const reply = sender.createReply(inboundMessage());
-
-  await reply.write("start");
-  await waitForStreamUpdate();
-  await reply.write("x".repeat(50));
-  await waitForStreamUpdate();
-  await reply.finish();
-
-  const final = streams.at(-1)!.text;
-  assert.match(final, /^startx{50}/);
-  assert.doesNotMatch(final, /truncated/i);
-  assert.match(final, /✓ Complete/);
-});
-
-test("stream preserves content by selecting a compact completion marker", async () => {
-  const totalCapacity = 15;
-  const { sender, streams } = senderFixture({}, async (input) => ({
-    id: `stream-${input.replyToId}`,
-    remainMessageLength: Math.max(
-      0,
-      totalCapacity - Array.from(input.text).length,
-    ),
-  }));
-  const reply = sender.createReply(inboundMessage());
-
-  await reply.write("start");
-  await waitForStreamUpdate();
-  await reply.write("x".repeat(8));
-  await reply.finish();
-
-  const final = streams.at(-1)!.text;
-  assert.equal(final, `start${"x".repeat(8)}✓`);
-  assert.doesNotMatch(final, /truncated/i);
-});
-
-test("stream length truncation keeps native fenced Markdown valid", async () => {
-  const totalCapacity = 100;
-  const { sender, streams } = senderFixture({}, async (input) => ({
-    id: `stream-${input.replyToId}`,
-    remainMessageLength: Math.max(
-      0,
-      totalCapacity - Array.from(input.text).length,
-    ),
-  }));
-  const reply = sender.createReply(inboundMessage());
-
-  await reply.write("Intro\n\n");
-  await waitForStreamUpdate();
-  await reply.write(`\`\`\`js\nconst value = "${"x".repeat(150)}";\n\`\`\``);
-  await reply.finish();
-
-  const final = streams.at(-1)!.text;
-  assert.ok(Array.from(final).length <= totalCapacity);
-  assert.match(final, /^Intro/);
-  assert.doesNotMatch(final, /```js(?![\s\S]*```)/);
-  assert.match(final, /⚠ Response truncated · ✓ Complete$/);
-});
-
-test("stream exhaustion uses only complete markers at tiny capacities", async () => {
-  const totalCapacity = 12;
-  const { sender, streams } = senderFixture({}, async (input) => ({
-    id: `stream-${input.replyToId}`,
-    remainMessageLength: Math.max(
-      0,
-      totalCapacity - Array.from(input.text).length,
-    ),
-  }));
-  const reply = sender.createReply(inboundMessage());
-
-  await reply.write("Intro");
-  await waitForStreamUpdate();
-  await reply.write(" content that will not fit");
-  await reply.finish();
-
-  const final = streams.at(-1)!.text;
-  assert.equal(Array.from(final).length, totalCapacity);
-  assert.equal(final, "Intro\n\n⚠ · ✓");
-  assert.doesNotMatch(final, /[_*`~]$/);
+  await assert.rejects(reply.finish(), /code 40054007/);
+  assert.equal(sent.length, 0);
+  assert.deepEqual(streams.map(({ index }) => index), [0, 1]);
+  assert.match(streams[1]!.text, /^startx{200}$/);
+  assert.match(logs.at(-1)!, /error=http-400$/);
 });
 
 test("plain compatibility rendering waits for a prefix-safe final frame", async () => {
@@ -890,7 +819,7 @@ function senderFixture(
   output: Partial<BotConfig["output"]> = {},
   streamResponse?: (
     input: QQSendStreamInput,
-  ) => Promise<{ id: string; remainMessageLength?: number }>,
+  ) => Promise<{ id: string; pendingCharacters?: number }>,
 ) {
   const config = createInitialConfig({
     appId: "app",
@@ -918,7 +847,7 @@ function senderFixture(
           ? streamResponse(input)
           : {
               id: `stream-${input.replyToId}`,
-              remainMessageLength: 10_000,
+              pendingCharacters: 0,
             };
       },
       uploadMedia: async (input) => {

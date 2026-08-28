@@ -32,22 +32,6 @@ const STREAM_UPDATE_INTERVAL_MS = 300;
 const STREAM_DIAGNOSTIC_INTERVAL_MS = 1_000;
 const STREAM_EMPTY_PLACEHOLDER = "…";
 const STREAM_COMPLETION_MARKER = "\n\n✓ Complete";
-const STREAM_COMPLETION_MARKERS = [
-  STREAM_COMPLETION_MARKER,
-  "\n\n✓",
-  "✓",
-] as const;
-const STREAM_TRUNCATED_MARKER =
-  "\n\n⚠ Response truncated · ✓ Complete";
-const STREAM_TRUNCATED_MARKERS = [
-  STREAM_TRUNCATED_MARKER,
-  "\n\n⚠ Truncated · ✓",
-  "\n\n⚠ · ✓",
-  "\n\n⚠✓",
-  "\n\n✓",
-  "✓",
-  "",
-] as const;
 const TRUNCATION_NOTICE =
   "Response truncated: QQ's passive reply limit was reached.";
 let nextStreamTrace = 1;
@@ -135,8 +119,6 @@ class BufferedQQReply implements QQReplyStream {
   private streamSequence?: number;
   private streamIndex = 0;
   private streamLastText = "";
-  private streamRemaining?: number;
-  private streamExhausted = false;
   private streamTimer?: ReturnType<typeof setTimeout>;
   private streamError?: unknown;
   private readonly streamTrace = nextStreamTrace++;
@@ -294,7 +276,7 @@ class BufferedQQReply implements QQReplyStream {
   }
 
   private scheduleStreamUpdate(): void {
-    if (this.streamTimer || this.streamExhausted) return;
+    if (this.streamTimer) return;
     this.streamTimer = setTimeout(() => {
       this.streamTimer = undefined;
       void this.enqueue(() => this.flushStreamUpdate()).catch((error) => {
@@ -311,13 +293,11 @@ class BufferedQQReply implements QQReplyStream {
 
   private async flushStreamUpdate(): Promise<void> {
     if (this.streamError !== undefined) throw this.streamError;
-    if (this.streamExhausted) return;
     const desired = this.renderStreamText();
     if (!desired || desired === this.streamLastText) return;
 
-    const content = this.capGeneratingStreamText(desired);
-    if (content === this.streamLastText) return;
-    await this.sendStreamFrame(content, 1);
+    this.assertStreamPrefix(desired);
+    await this.sendStreamFrame(desired, 1);
   }
 
   private async finishOfficialStream(): Promise<void> {
@@ -326,62 +306,14 @@ class BufferedQQReply implements QQReplyStream {
       desired ||= STREAM_EMPTY_PLACEHOLDER;
       await this.sendStreamFrame(desired, 1);
     }
-    const final = this.capFinalStreamText(desired);
-    await this.sendStreamFrame(final, 10);
+    this.assertStreamPrefix(desired);
+    await this.sendStreamFrame(`${desired}${STREAM_COMPLETION_MARKER}`, 10);
   }
 
   private renderStreamText(final = false): string {
     if (!final && this.effectiveMarkdownMode() === "plain") return "";
     const source = final ? this.buffer : streamSafeSource(this.buffer);
     return this.render(source);
-  }
-
-  private capGeneratingStreamText(desired: string): string {
-    this.assertStreamPrefix(desired);
-    if (this.streamRemaining === undefined) return desired;
-
-    const suffix = desired.slice(this.streamLastText.length);
-    if (
-      countCharacters(suffix) +
-        countCharacters(STREAM_COMPLETION_MARKERS.at(-1)!) <=
-      this.streamRemaining
-    ) {
-      return desired;
-    }
-
-    this.streamExhausted = true;
-    return this.streamLastText;
-  }
-
-  private capFinalStreamText(desired: string): string {
-    this.assertStreamPrefix(desired);
-    const suffix = desired.slice(this.streamLastText.length);
-    if (this.streamRemaining === undefined) {
-      return `${desired}${STREAM_COMPLETION_MARKER}`;
-    }
-
-    const completionMarker = streamCompletionMarker(
-      this.streamRemaining - countCharacters(suffix),
-    );
-    if (
-      !this.streamExhausted &&
-      completionMarker !== undefined
-    ) {
-      return `${desired}${completionMarker}`;
-    }
-
-    const truncatedMarker = streamTruncatedMarker(this.streamRemaining);
-    const contentCapacity = Math.max(
-      0,
-      this.streamRemaining - countCharacters(truncatedMarker),
-    );
-    const truncated = truncateStreamText(
-      desired,
-      this.streamLastText,
-      contentCapacity,
-      this.effectiveMarkdownMode() === "native",
-    );
-    return `${truncated}${truncatedMarker}`;
   }
 
   private assertStreamPrefix(desired: string): void {
@@ -396,8 +328,6 @@ class BufferedQQReply implements QQReplyStream {
     if (this.streamSequence === undefined) {
       this.streamSequence = this.allocateSequence();
     }
-    const previousText = this.streamLastText;
-    const previousRemaining = this.streamRemaining;
     const frameIndex = this.streamIndex;
     this.log(
       `QQ stream frame sending trace=${this.streamTrace} index=${frameIndex} state=${state} chars=${countCharacters(text)}`,
@@ -432,17 +362,8 @@ class BufferedQQReply implements QQReplyStream {
     this.streamMessageId ??= response.id;
     this.streamIndex++;
     this.streamLastText = text;
-    this.streamRemaining =
-      response.remainMessageLength ??
-      (previousRemaining === undefined
-        ? undefined
-        : Math.max(
-            0,
-            previousRemaining -
-              countCharacters(text.slice(previousText.length)),
-          ));
     this.log(
-      `QQ stream frame accepted trace=${this.streamTrace} index=${frameIndex} state=${state} chars=${countCharacters(text)} remaining=${this.streamRemaining ?? "unknown"}`,
+      `QQ stream frame accepted trace=${this.streamTrace} index=${frameIndex} state=${state} chars=${countCharacters(text)} pending=${response.pendingCharacters ?? "unknown"}`,
     );
   }
 
@@ -656,53 +577,6 @@ function streamSafeSource(source: string): string {
 
 function countCharacters(text: string): number {
   return Array.from(text).length;
-}
-
-function takeCharacters(text: string, maximum: number): string {
-  if (maximum <= 0) return "";
-  return Array.from(text).slice(0, maximum).join("");
-}
-
-function truncateStreamText(
-  desired: string,
-  immutablePrefix: string,
-  additionalCapacity: number,
-  markdown: boolean,
-): string {
-  const maximum = countCharacters(immutablePrefix) + additionalCapacity;
-  if (countCharacters(desired) <= maximum) return desired;
-  if (maximum <= 0) return "";
-
-  const codeUnitLimit = takeCharacters(desired, maximum).length;
-  try {
-    const candidate = (
-      markdown
-        ? splitMarkdown(desired, codeUnitLimit)
-        : splitText(desired, codeUnitLimit)
-    )[0];
-    if (
-      candidate?.startsWith(immutablePrefix) &&
-      countCharacters(candidate) <= maximum &&
-      streamSafeSource(candidate) === candidate
-    ) {
-      return candidate;
-    }
-  } catch (error) {
-    if (!(error instanceof RangeError)) throw error;
-  }
-  return immutablePrefix;
-}
-
-function streamTruncatedMarker(maximum: number): string {
-  return STREAM_TRUNCATED_MARKERS.find(
-    (marker) => countCharacters(marker) <= maximum,
-  )!;
-}
-
-function streamCompletionMarker(maximum: number): string | undefined {
-  return STREAM_COMPLETION_MARKERS.find(
-    (marker) => countCharacters(marker) <= maximum,
-  );
 }
 
 function sleep(milliseconds: number): Promise<void> {
