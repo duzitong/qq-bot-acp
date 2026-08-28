@@ -160,7 +160,14 @@ export class QQApi {
     });
     const result = (await response.json().catch(() => ({}))) as Record<string, unknown>;
     if (!response.ok) {
-      throw new Error(`QQ stream send failed (${response.status}): ${JSON.stringify(result)}`);
+      const code = result.code ?? result.err_code;
+      throw new Error(
+        `QQ stream send failed (${response.status}${
+          typeof code === "number" || typeof code === "string"
+            ? `; code ${code}`
+            : ""
+        })`,
+      );
     }
     return parseStreamMessageResponse(result);
   }
@@ -246,18 +253,14 @@ export function parseStreamMessageResponse(
   result: Record<string, unknown>,
 ): QQStreamMessageResponse {
   if (typeof result.id !== "string" || !result.id) {
-    throw new Error(
-      `QQ stream response did not include a message ID: ${JSON.stringify(result)}`,
-    );
+    throw new Error("QQ stream response did not include a message ID");
   }
   if (
     result.remain_msg_len !== undefined &&
     (!Number.isInteger(result.remain_msg_len) ||
       (result.remain_msg_len as number) < 0)
   ) {
-    throw new Error(
-      `QQ stream response included an invalid remaining length: ${JSON.stringify(result)}`,
-    );
+    throw new Error("QQ stream response included an invalid remaining length");
   }
   return {
     id: result.id,

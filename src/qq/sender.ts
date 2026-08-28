@@ -29,6 +29,7 @@ const FINAL_REPLY_RESERVE = 1;
 const MAX_ARTIFACTS_PER_TURN = 2;
 const STREAM_LENGTH_MARGIN = 64;
 const STREAM_UPDATE_INTERVAL_MS = 300;
+const STREAM_DIAGNOSTIC_INTERVAL_MS = 1_000;
 const STREAM_EMPTY_PLACEHOLDER = "…";
 const STREAM_COMPLETION_MARKER = "\n\n✓ Complete";
 const STREAM_COMPLETION_MARKERS = [
@@ -49,6 +50,7 @@ const STREAM_TRUNCATED_MARKERS = [
 ] as const;
 const TRUNCATION_NOTICE =
   "Response truncated: QQ's passive reply limit was reached.";
+let nextStreamTrace = 1;
 
 type EffectiveMarkdownMode = BotConfig["output"]["markdownMode"];
 
@@ -61,6 +63,7 @@ export interface QQMessageApi {
 
 export interface QQReplyStream {
   write(text: string): Promise<void>;
+  flush(): Promise<void>;
   sendArtifact(
     artifact: PreparedArtifact,
     caption?: string,
@@ -72,6 +75,7 @@ export class QQSender {
   constructor(
     private readonly api: QQMessageApi,
     private readonly getConfig: () => BotConfig,
+    private readonly log: (message: string) => void = () => {},
   ) {}
 
   createReply(message: QQInboundMessage): QQReplyStream {
@@ -79,12 +83,43 @@ export class QQSender {
       this.api,
       message,
       this.getConfig().output,
+      this.log,
     );
   }
 
   async reply(message: QQInboundMessage, text: string): Promise<void> {
     const reply = this.createReply(message);
     await reply.write(text);
+    await reply.finish();
+  }
+
+  async runStreamingDiagnostic(
+    message: QQInboundMessage,
+    pause: (milliseconds: number) => Promise<void> = sleep,
+  ): Promise<void> {
+    if (message.chatType !== "direct") {
+      throw new Error("QQ streaming diagnostics require a direct chat");
+    }
+    const reply = new BufferedQQReply(
+      this.api,
+      message,
+      {
+        ...this.getConfig().output,
+        markdownMode: "native",
+        streamResponses: true,
+      },
+      this.log,
+    );
+    const deltas = [
+      "# QQ Streaming Diagnostic\n\n1. First generating frame accepted.",
+      "\n\n2. Second generating frame accepted after one second.",
+      "\n\n3. Third generating frame accepted after another second.",
+    ];
+    for (const delta of deltas) {
+      await reply.write(delta);
+      await reply.flush();
+      await pause(STREAM_DIAGNOSTIC_INTERVAL_MS);
+    }
     await reply.finish();
   }
 }
@@ -104,15 +139,21 @@ class BufferedQQReply implements QQReplyStream {
   private streamExhausted = false;
   private streamTimer?: ReturnType<typeof setTimeout>;
   private streamError?: unknown;
+  private readonly streamTrace = nextStreamTrace++;
 
   constructor(
     private readonly api: QQMessageApi,
     private readonly message: QQInboundMessage,
     private readonly output: BotConfig["output"],
+    private readonly log: (message: string) => void,
   ) {}
 
   write(text: string): Promise<void> {
     return this.enqueue(() => this.writeNow(text));
+  }
+
+  flush(): Promise<void> {
+    return this.enqueue(() => this.flushNow());
   }
 
   sendArtifact(
@@ -137,6 +178,17 @@ class BufferedQQReply implements QQReplyStream {
       return;
     }
     await this.flushProgressive();
+  }
+
+  private async flushNow(): Promise<void> {
+    if (this.finished) throw new Error("Cannot flush a finished QQ reply");
+    if (this.streamError !== undefined) throw this.streamError;
+    if (this.usesOfficialStream()) {
+      this.clearStreamTimer();
+      await this.flushStreamUpdate();
+      return;
+    }
+    if (this.output.streamResponses) await this.flushProgressive();
   }
 
   private async sendArtifactNow(
@@ -346,17 +398,29 @@ class BufferedQQReply implements QQReplyStream {
     }
     const previousText = this.streamLastText;
     const previousRemaining = this.streamRemaining;
-    const response = await this.api.sendStream({
-      targetId: this.message.targetId,
-      text,
-      replyToId: this.message.messageId,
-      sequence: this.streamSequence,
-      index: this.streamIndex,
-      state,
-      contentType:
-        this.effectiveMarkdownMode() === "native" ? "markdown" : "text",
-      streamMessageId: this.streamMessageId,
-    });
+    const frameIndex = this.streamIndex;
+    this.log(
+      `QQ stream frame sending trace=${this.streamTrace} index=${frameIndex} state=${state} chars=${countCharacters(text)}`,
+    );
+    let response: QQStreamMessageResponse;
+    try {
+      response = await this.api.sendStream({
+        targetId: this.message.targetId,
+        text,
+        replyToId: this.message.messageId,
+        sequence: this.streamSequence,
+        index: frameIndex,
+        state,
+        contentType:
+          this.effectiveMarkdownMode() === "native" ? "markdown" : "text",
+        streamMessageId: this.streamMessageId,
+      });
+    } catch (error) {
+      this.log(
+        `QQ stream frame failed trace=${this.streamTrace} index=${frameIndex} state=${state} error=${streamErrorCategory(error)}`,
+      );
+      throw error;
+    }
     if (
       this.streamMessageId !== undefined &&
       response.id !== this.streamMessageId
@@ -377,6 +441,9 @@ class BufferedQQReply implements QQReplyStream {
             previousRemaining -
               countCharacters(text.slice(previousText.length)),
           ));
+    this.log(
+      `QQ stream frame accepted trace=${this.streamTrace} index=${frameIndex} state=${state} chars=${countCharacters(text)} remaining=${this.streamRemaining ?? "unknown"}`,
+    );
   }
 
   private render(text: string): string {
@@ -636,4 +703,21 @@ function streamCompletionMarker(maximum: number): string | undefined {
   return STREAM_COMPLETION_MARKERS.find(
     (marker) => countCharacters(marker) <= maximum,
   );
+}
+
+function sleep(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+function streamErrorCategory(error: unknown): string {
+  const message = error instanceof Error ? error.message : "";
+  const status = message.match(/^QQ stream send failed \((\d+)/)?.[1];
+  if (status) return `http-${status}`;
+  if (message.startsWith("QQ stream response did not include")) {
+    return "invalid-response-id";
+  }
+  if (message.startsWith("QQ stream response included an invalid")) {
+    return "invalid-response-length";
+  }
+  return "request-error";
 }

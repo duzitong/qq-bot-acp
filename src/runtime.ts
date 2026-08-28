@@ -29,7 +29,7 @@ export class BotRuntime {
       log,
     );
     let controller!: BotController;
-    const sender = new QQSender(api, () => controller.getConfig());
+    const sender = new QQSender(api, () => controller.getConfig(), log);
     controller = new BotController(config, store, this.sessions, sender, log);
     this.controller = controller;
     this.gateway = new QQGateway(

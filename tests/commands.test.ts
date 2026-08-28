@@ -28,3 +28,10 @@ test("session configuration aliases remain conversation scoped", () => {
     operation: "reset",
   });
 });
+
+test("streaming diagnostic command is recognized exactly", () => {
+  assert.deepEqual(parseControlCommand("/test-streaming"), {
+    kind: "test-streaming",
+  });
+  assert.equal(parseControlCommand("/test-streaming now"), null);
+});

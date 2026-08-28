@@ -49,6 +49,17 @@ export class BotController {
       await this.handleGlobalConfig(message, command);
       return;
     }
+    if (command?.kind === "test-streaming") {
+      if (message.chatType !== "direct" || !this.isAdmin(message.senderId)) {
+        await this.sender.reply(
+          message,
+          "The /test-streaming command is restricted to administrators in private chat.",
+        );
+      } else {
+        await this.sender.runStreamingDiagnostic(message);
+      }
+      return;
+    }
     if (!this.isAllowed(message)) {
       await this.sender.reply(message, "You are not allowed to use this bot.");
       return;

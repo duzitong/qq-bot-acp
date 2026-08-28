@@ -240,6 +240,46 @@ test("official direct streams ignore the legacy text chunk limit", async () => {
   assert.doesNotMatch(streams[1]!.text, /truncated/i);
 });
 
+test("streaming diagnostic bypasses ACP and emits visible timed frames", async () => {
+  const { sender, streams, logs } = senderFixture({
+    markdownMode: "plain",
+    streamResponses: false,
+  });
+  const pauses: number[] = [];
+
+  await sender.runStreamingDiagnostic(
+    inboundMessage(),
+    async (milliseconds) => {
+      pauses.push(milliseconds);
+    },
+  );
+
+  assert.deepEqual(pauses, [1_000, 1_000, 1_000]);
+  assert.deepEqual(streams.map(({ index }) => index), [0, 1, 2, 3]);
+  assert.deepEqual(streams.map(({ state }) => state), [1, 1, 1, 10]);
+  assert.ok(streams.every(({ contentType }) => contentType === "markdown"));
+  assert.ok(streams.slice(1).every(
+    ({ streamMessageId }) => streamMessageId === "stream-inbound",
+  ));
+  assert.ok(streams.every(
+    ({ replyToId, sequence }) => replyToId === "inbound" && sequence === 1,
+  ));
+  assert.match(streams[0]!.text, /1\. First generating frame accepted\.$/);
+  assert.match(streams[1]!.text, /2\. Second generating frame accepted/);
+  assert.match(streams[2]!.text, /3\. Third generating frame accepted/);
+  assert.match(streams[3]!.text, /3\. Third generating frame accepted[\s\S]*✓ Complete$/);
+  assert.equal(
+    logs.filter((entry) => entry.includes("frame accepted")).length,
+    4,
+  );
+  assert.ok(logs.every((entry) => !entry.includes(streams[0]!.text)));
+
+  await assert.rejects(
+    sender.runStreamingDiagnostic(inboundMessage("group"), async () => {}),
+    /require a direct chat/,
+  );
+});
+
 test("direct streaming preserves Markdown and LaTeX across ACP delta boundaries", async () => {
   const { sender, streams } = senderFixture();
   const reply = sender.createReply(inboundMessage());
@@ -625,9 +665,9 @@ test("send failures propagate without a duplicate fallback reply", async () => {
 
 test("stream update failures surface without sending a fallback reply", async () => {
   let attempts = 0;
-  const { sender, sent } = senderFixture({}, async () => {
+  const { sender, sent, logs } = senderFixture({}, async () => {
     attempts++;
-    throw new Error("QQ stream unavailable");
+    throw new Error("QQ stream unavailable with sensitive response");
   });
   const reply = sender.createReply(inboundMessage());
 
@@ -636,6 +676,8 @@ test("stream update failures surface without sending a fallback reply", async ()
   await assert.rejects(reply.finish(), /QQ stream unavailable/);
   assert.equal(attempts, 1);
   assert.equal(sent.length, 0);
+  assert.match(logs.at(-1)!, /error=request-error$/);
+  assert.doesNotMatch(logs.at(-1)!, /sensitive response/);
 });
 
 test("stream truncates only after QQ reports true length exhaustion", async () => {
@@ -861,6 +903,7 @@ function senderFixture(
   const uploads: QQUploadMediaInput[] = [];
   const media: QQSendMediaInput[] = [];
   const operations: string[] = [];
+  const logs: string[] = [];
   const sender = new QQSender(
     {
       sendText: async (input) => {
@@ -890,8 +933,9 @@ function senderFixture(
       },
     },
     () => config,
+    (message) => logs.push(message),
   );
-  return { sender, sent, streams, uploads, media, operations };
+  return { sender, sent, streams, uploads, media, operations, logs };
 }
 
 function artifact(digest: string, fileName: string): PreparedArtifact {

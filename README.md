@@ -238,7 +238,15 @@ Other bridge commands:
 /acp-cancel
 /acp-new
 /id
+/test-streaming
 ```
+
+An administrator can send `/test-streaming` in a direct chat to test QQ's
+official streaming transport without starting an ACP turn. The diagnostic
+forces three generating frames one second apart, then sends the final
+`input_state: 10` frame. Service logs record only the per-turn trace, frame
+index/state, character count, and QQ-reported remaining capacity; message
+content and full message IDs are not logged.
 
 ## Agent examples
 

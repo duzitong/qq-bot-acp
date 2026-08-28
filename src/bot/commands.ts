@@ -2,12 +2,14 @@ export type ControlCommand =
   | { kind: "id" }
   | { kind: "config"; key?: string; value?: string; operation: "show" | "get" | "set" | "status" }
   | { kind: "session-config"; key?: string; value?: string; operation: "show" | "set" | "reset" }
+  | { kind: "test-streaming" }
   | { kind: "cancel" }
   | { kind: "new" };
 
 export function parseControlCommand(text: string): ControlCommand | null {
   const trimmed = text.trim();
   if (trimmed === "/id") return { kind: "id" };
+  if (trimmed === "/test-streaming") return { kind: "test-streaming" };
   if (trimmed === "/acp-cancel") return { kind: "cancel" };
   if (trimmed === "/acp-new") return { kind: "new" };
 
