@@ -130,15 +130,29 @@ processes so each conversation starts against the new agent.
 
 ## Output formatting and streaming
 
-Agent responses stream to QQ at complete Markdown block boundaries instead of
-waiting for the entire ACP turn. Small token fragments are buffered until at
-least `output.streamMinChars` characters are available. Fenced code blocks,
-top-level list items, and nested list content are kept on valid Markdown
-boundaries. Oversized fenced blocks are closed and reopened across messages so
-each chunk remains valid. QQ permits at most five passive replies to one
-message, so the bridge reserves the final reply for remaining output, shares
-one sequence across text and artifacts, and marks content that must be
-truncated.
+Direct-chat responses use QQ's official
+[`/v2/users/{openid}/stream_messages`](https://bot.q.qq.com/wiki/develop/api-v2/autogen/api/v2_users_user_openid_stream_messages.post.html)
+API. Each inbound QQ message owns one independent response stream: every
+update retains that message's original `msg_id` and `msg_seq`, then reuses the
+`stream_msg_id` returned by QQ's first frame. ACP deltas are accumulated and
+sent as throttled full-document `replace` updates, and the final update sets
+`input_state: 10` with a small completion marker in the same message. Fenced
+code and explicit LaTeX that span ACP deltas are held until structurally
+complete so an update never rewrites a prefix QQ may already have displayed.
+
+QQ currently exposes `stream_messages` for direct/C2C chats only. Group chats
+explicitly do not support streaming parameters, and channel replies use the
+normal channel message API. Those scenarios retain Markdown-aware progressive
+batching: fenced code blocks, top-level list items, and nested list content
+remain on valid boundaries. QQ permits four passive replies per inbound direct
+message and five per inbound group message. Text streams/messages and explicit
+artifacts share that per-message sequence budget without rebinding a response
+to a newer inbound message.
+
+The bridge does not split a direct stream at the legacy 2,000-character chunk
+size. It uses QQ's returned `remain_msg_len` as the authoritative capacity,
+reserves room for the final marker, and adds a truncation notice only when that
+reported capacity is actually exhausted.
 
 Native QQ Markdown is the default for direct and group conversations. QQ opened
 custom Markdown in those two scenarios to all bots on April 23, 2026; no
@@ -171,7 +185,13 @@ Output behavior can be adjusted from an administrator private chat:
 Set `output.markdownMode` to `"plain"` to force compatibility rendering in all
 conversations, or to `"raw"` to send unformatted text payloads. Set
 `output.streamResponses` to `false` to wait for turn completion before
-replying.
+replying through the normal message API. For backward compatibility,
+`output.textChunkLimit` and `output.streamMinChars` remain valid configuration
+keys, but they apply only to non-streaming group/channel replies and to the
+direct fallback selected by `output.streamResponses: false`; official direct
+streams ignore both settings. Plain compatibility mode renders only the final
+direct stream frame because stripping Markdown incrementally could rewrite a
+prefix after a delimiter closes; native and raw modes update progressively.
 
 ## Sending artifacts
 
@@ -190,9 +210,11 @@ upload occurs only when the agent explicitly calls `send_artifact`.
 Artifact delivery supports PNG/JPEG images, MP4 video, and SILK/MP3/WAV/OGG
 voice audio up to 20 MiB per file in direct and group chats. Calls are accepted
 only while handling an active QQ message, duplicate content is sent once per
-turn, and at most two artifacts can be sent per turn so QQ's
-five-passive-reply budget retains room for text. The configured ACP agent must
-advertise HTTP MCP support.
+turn, and at most two artifacts can be sent per turn. Artifacts remain separate
+rich-media replies and use their own sequence numbers, while all frames in a
+direct text stream retain one sequence number; the combined identities remain
+within QQ's four-reply direct or five-reply group budget. The configured ACP
+agent must advertise HTTP MCP support.
 
 ## ACP session configuration
 

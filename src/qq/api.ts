@@ -37,6 +37,22 @@ export interface QQSendMediaInput {
   caption?: string;
 }
 
+export interface QQSendStreamInput {
+  targetId: string;
+  text: string;
+  replyToId: string;
+  sequence: number;
+  index: number;
+  state: 1 | 10;
+  contentType: "text" | "markdown";
+  streamMessageId?: string;
+}
+
+export interface QQStreamMessageResponse {
+  id: string;
+  remainMessageLength?: number;
+}
+
 export class QQApi {
   private accessToken?: string;
   private tokenExpiresAt = 0;
@@ -135,6 +151,20 @@ export class QQApi {
     return result.id;
   }
 
+  async sendStream(input: QQSendStreamInput): Promise<QQStreamMessageResponse> {
+    const endpoint = `/v2/users/${encodeURIComponent(input.targetId)}/stream_messages`;
+    const response = await this.request(endpoint, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(buildStreamMessageBody(input)),
+    });
+    const result = (await response.json().catch(() => ({}))) as Record<string, unknown>;
+    if (!response.ok) {
+      throw new Error(`QQ stream send failed (${response.status}): ${JSON.stringify(result)}`);
+    }
+    return parseStreamMessageResponse(result);
+  }
+
   private async request(endpoint: string, init: RequestInit, retry = true): Promise<Response> {
     const token = await this.getAccessToken();
     const response = await fetch(`${API_BASE_URL}${endpoint}`, {
@@ -192,5 +222,48 @@ export function buildMediaMessageBody(input: QQSendMediaInput): Record<string, u
     media: { file_info: input.fileInfo },
     msg_id: input.replyToId,
     msg_seq: input.sequence,
+  };
+}
+
+export function buildStreamMessageBody(
+  input: QQSendStreamInput,
+): Record<string, unknown> {
+  return {
+    input_mode: "replace",
+    input_state: input.state,
+    index: input.index,
+    content_type: input.contentType,
+    content_raw: input.text,
+    msg_id: input.replyToId,
+    ...(input.streamMessageId
+      ? { stream_msg_id: input.streamMessageId }
+      : {}),
+    msg_seq: input.sequence,
+  };
+}
+
+export function parseStreamMessageResponse(
+  result: Record<string, unknown>,
+): QQStreamMessageResponse {
+  if (typeof result.id !== "string" || !result.id) {
+    throw new Error(
+      `QQ stream response did not include a message ID: ${JSON.stringify(result)}`,
+    );
+  }
+  if (
+    result.remain_msg_len !== undefined &&
+    (!Number.isInteger(result.remain_msg_len) ||
+      (result.remain_msg_len as number) < 0)
+  ) {
+    throw new Error(
+      `QQ stream response included an invalid remaining length: ${JSON.stringify(result)}`,
+    );
+  }
+  return {
+    id: result.id,
+    remainMessageLength:
+      result.remain_msg_len === undefined
+        ? undefined
+        : result.remain_msg_len as number,
   };
 }

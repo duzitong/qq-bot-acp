@@ -41,6 +41,23 @@ test("per-conversation manager exchanges prompts with an ACP child process", asy
     assert.deepEqual(replies, ["echo:", "hello"]);
     assert.equal(completed, true);
 
+    const firstTurn: string[] = [];
+    const secondTurn: string[] = [];
+    await Promise.all([
+      manager.prompt(
+        "qqbot:test:direct:user",
+        [{ type: "text", text: "first" }],
+        { onText: async (text) => { firstTurn.push(text); } },
+      ),
+      manager.prompt(
+        "qqbot:test:direct:user",
+        [{ type: "text", text: "second" }],
+        { onText: async (text) => { secondTurn.push(text); } },
+      ),
+    ]);
+    assert.deepEqual(firstTurn, ["echo:", "first"]);
+    assert.deepEqual(secondTurn, ["echo:", "second"]);
+
     const options = await manager.setSessionConfig(
       "qqbot:test:direct:user",
       "model",

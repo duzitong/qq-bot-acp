@@ -4,8 +4,12 @@ import { createInitialConfig, type BotConfig } from "../src/config/schema.js";
 import {
   buildMediaUploadBody,
   buildMediaMessageBody,
+  buildStreamMessageBody,
   buildTextMessageBody,
+  parseStreamMessageResponse,
+  QQApi,
   type QQSendMediaInput,
+  type QQSendStreamInput,
   type QQSendTextInput,
   type QQUploadMediaInput,
 } from "../src/qq/api.js";
@@ -163,75 +167,138 @@ match(x,g)=\text{x与猜测g在相同位置上数字相同的个数}
   );
 });
 
-test("agent output streams at complete Markdown blocks", async () => {
-  const { sender, sent } = senderFixture({
-    textChunkLimit: 200,
-    streamMinChars: 100,
-  });
+test("direct replies use one official QQ stream from first update through completion", async () => {
+  const { sender, sent, streams } = senderFixture();
   const reply = sender.createReply(inboundMessage());
 
-  await reply.write(`# Overview\n\n${"a".repeat(110)}\n\n`);
-  assert.equal(sent.length, 1);
-  assert.match(sent[0]!.text, /^# Overview\n\na+$/);
-
-  await reply.write("Final **answer**.");
-  assert.equal(sent.length, 1);
+  await reply.write("# Overview\n\nFirst");
+  await waitForStreamUpdate();
+  await reply.write(" answer.");
+  await waitForStreamUpdate();
   await reply.finish();
 
+  assert.equal(sent.length, 0);
   assert.deepEqual(
-    sent.map(({ sequence, text, markdown }) => ({ sequence, text, markdown })),
+    streams.map((stream) => ({
+      text: stream.text,
+      replyToId: stream.replyToId,
+      sequence: stream.sequence,
+      index: stream.index,
+      state: stream.state,
+      contentType: stream.contentType,
+      streamMessageId: stream.streamMessageId,
+    })),
     [
       {
+        text: "# Overview\n\nFirst",
+        replyToId: "inbound",
         sequence: 1,
-        text: `# Overview\n\n${"a".repeat(110)}`,
-        markdown: true,
+        index: 0,
+        state: 1,
+        contentType: "markdown",
+        streamMessageId: undefined,
       },
-      { sequence: 2, text: "Final **answer**.", markdown: true },
+      {
+        text: "# Overview\n\nFirst answer.",
+        replyToId: "inbound",
+        sequence: 1,
+        index: 1,
+        state: 1,
+        contentType: "markdown",
+        streamMessageId: "stream-inbound",
+      },
+      {
+        text: "# Overview\n\nFirst answer.\n\n✓ Complete",
+        replyToId: "inbound",
+        sequence: 1,
+        index: 2,
+        state: 10,
+        contentType: "markdown",
+        streamMessageId: "stream-inbound",
+      },
     ],
   );
 });
 
-test("streaming keeps a display LaTeX formula together", async () => {
-  const { sender, sent } = senderFixture({
-    textChunkLimit: 200,
-    streamMinChars: 100,
+test("official direct streams ignore the legacy text chunk limit", async () => {
+  const { sender, sent, streams } = senderFixture({
+    textChunkLimit: 100,
   });
   const reply = sender.createReply(inboundMessage());
+  const response = `# Long answer\n\n${"x".repeat(500)}`;
 
-  await reply.write(`\\[\n${"x+".repeat(55)}\n`);
-  assert.equal(sent.length, 0);
-
-  await reply.write("\\]\n\n");
-  assert.equal(sent.length, 1);
-  assert.match(sent[0]!.text, /^x\+/);
-  assert.equal(sent[0]!.markdown, true);
+  await reply.write(response);
   await reply.finish();
-  assert.equal(sent.length, 1);
+
+  assert.equal(sent.length, 0);
+  assert.equal(streams.length, 2);
+  assert.deepEqual(streams.map((frame) => frame.state), [1, 10]);
+  assert.deepEqual(streams.map((frame) => frame.index), [0, 1]);
+  assert.equal(streams[0]!.streamMessageId, undefined);
+  assert.equal(streams[1]!.streamMessageId, "stream-inbound");
+  assert.match(streams[1]!.text, /^# Long answer\n\nx{500}/);
+  assert.doesNotMatch(streams[1]!.text, /truncated/i);
 });
 
-test("streaming keeps a fenced code block together", async () => {
-  const { sender, sent } = senderFixture({
-    textChunkLimit: 240,
-    streamMinChars: 100,
-  });
+test("direct streaming preserves Markdown and LaTeX across ACP delta boundaries", async () => {
+  const { sender, streams } = senderFixture();
   const reply = sender.createReply(inboundMessage());
 
-  await reply.write(`\`\`\`bash\nprintf '%s' "${"x".repeat(110)}"\n`);
-  assert.equal(sent.length, 0);
+  await reply.write("# Result\n\n\\[\nmatch(x,g)=\\text{x");
+  await waitForStreamUpdate();
+  assert.equal(streams.length, 1);
+  assert.equal(streams[0]!.text, "# Result");
 
-  await reply.write("```\n\n");
-  assert.equal(sent.length, 1);
+  await reply.write("与猜测g相同的个数}\n\\]\n\n```ts\nconst x =");
+  await waitForStreamUpdate();
+  assert.equal(streams.length, 2);
   assert.equal(
-    sent[0]!.text,
-    [
-      "```bash",
-      `printf '%s' "${"x".repeat(110)}"`,
-      "```",
-    ].join("\n"),
+    streams[1]!.text,
+    "# Result\n\nmatch(x, g) = x与猜测g相同的个数",
   );
-  assert.equal(sent[0]!.markdown, true);
+
+  await reply.write(" 1;\n```\n");
   await reply.finish();
-  assert.equal(sent.length, 1);
+  assert.match(
+    streams.at(-1)!.text,
+    /match\(x, g\) = x与猜测g相同的个数\n\n```ts\nconst x = 1;\n```/,
+  );
+  assert.equal(streams.at(-1)!.state, 10);
+});
+
+test("direct streaming handles a LaTeX opener split after its backslash", async () => {
+  const { sender, streams } = senderFixture();
+  const reply = sender.createReply(inboundMessage());
+
+  await reply.write("Value: \\");
+  await waitForStreamUpdate();
+  assert.equal(streams[0]!.text, "Value:");
+
+  await reply.write("(x^2");
+  await waitForStreamUpdate();
+  assert.equal(streams.length, 1);
+
+  await reply.write("\\) done");
+  await reply.finish();
+  assert.match(streams.at(-1)!.text, /^Value: x² done/);
+  assert.equal(streams.at(-1)!.state, 10);
+});
+
+test("direct streaming waits for lookahead after an inline-dollar close", async () => {
+  const { sender, streams } = senderFixture();
+  const reply = sender.createReply(inboundMessage());
+
+  await reply.write("Value $x$");
+  await waitForStreamUpdate();
+  assert.equal(streams[0]!.text, "Value");
+
+  await reply.write("2");
+  await waitForStreamUpdate();
+  assert.equal(streams.length, 1);
+
+  await reply.finish();
+  assert.match(streams.at(-1)!.text, /^Value \$x\$2/);
+  assert.equal(streams.at(-1)!.state, 10);
 });
 
 test("long native Markdown splits into valid fenced code and list chunks", () => {
@@ -269,12 +336,12 @@ test("long native Markdown splits into valid fenced code and list chunks", () =>
   assert.match(listChunks.at(-1)!, /\n    - nested child$/);
 });
 
-test("streaming splits lists only between top-level items", async () => {
+test("group fallback batching splits lists only between top-level items", async () => {
   const { sender, sent } = senderFixture({
     textChunkLimit: 180,
     streamMinChars: 100,
   });
-  const reply = sender.createReply(inboundMessage());
+  const reply = sender.createReply(inboundMessage("group"));
   const firstItem = `1. First item ${"x".repeat(90)}\n    - nested detail\n`;
   const secondItem = `2. Second item ${"y".repeat(80)}\n\n`;
 
@@ -295,12 +362,25 @@ test("QQ passive replies are capped and visibly truncated", async () => {
     streamResponses: false,
   });
 
-  await sender.reply(inboundMessage(), "x".repeat(650));
+  await sender.reply(inboundMessage("group"), "x".repeat(650));
 
   assert.equal(sent.length, 5);
   assert.deepEqual(sent.map((message) => message.sequence), [1, 2, 3, 4, 5]);
   assert.match(sent[4]!.text, /Response truncated/);
   assert.ok(sent.every((message) => message.text.length <= 100));
+});
+
+test("non-streaming direct fallback uses the official four-reply limit", async () => {
+  const { sender, sent } = senderFixture({
+    textChunkLimit: 100,
+    streamResponses: false,
+  });
+
+  await sender.reply(inboundMessage(), "x".repeat(650));
+
+  assert.equal(sent.length, 4);
+  assert.deepEqual(sent.map((message) => message.sequence), [1, 2, 3, 4]);
+  assert.match(sent[3]!.text, /Response truncated/);
 });
 
 test("truncation keeps the final native fenced-code chunk valid", async () => {
@@ -317,7 +397,7 @@ test("truncation keeps the final native fenced-code chunk valid", async () => {
     "```",
   ].join("\n");
 
-  await sender.reply(inboundMessage(), response);
+  await sender.reply(inboundMessage("group"), response);
 
   assert.equal(sent.length, 5);
   assert.ok(sent.every(({ text, markdown }) => text.length <= 100 && markdown));
@@ -346,6 +426,139 @@ test("direct and group Markdown use QQ msg_type 2 payloads", () => {
       },
     );
   }
+});
+
+test("QQ stream request bodies and responses follow the official contract", () => {
+  const base: QQSendStreamInput = {
+    targetId: "user",
+    text: "# Answer",
+    replyToId: "inbound",
+    sequence: 2,
+    index: 0,
+    state: 1,
+    contentType: "markdown",
+  };
+  assert.deepEqual(buildStreamMessageBody(base), {
+    input_mode: "replace",
+    input_state: 1,
+    index: 0,
+    content_type: "markdown",
+    content_raw: "# Answer",
+    msg_id: "inbound",
+    msg_seq: 2,
+  });
+
+  assert.deepEqual(
+    buildStreamMessageBody({
+      ...base,
+      text: "# Answer\n\nDone",
+      index: 1,
+      state: 10,
+      streamMessageId: "stream-1",
+    }),
+    {
+      input_mode: "replace",
+      input_state: 10,
+      index: 1,
+      content_type: "markdown",
+      content_raw: "# Answer\n\nDone",
+      msg_id: "inbound",
+      stream_msg_id: "stream-1",
+      msg_seq: 2,
+    },
+  );
+  assert.deepEqual(
+    parseStreamMessageResponse({ id: "stream-1", remain_msg_len: 1234 }),
+    { id: "stream-1", remainMessageLength: 1234 },
+  );
+  assert.throws(
+    () => parseStreamMessageResponse({ remain_msg_len: 1234 }),
+    /did not include a message ID/,
+  );
+  assert.throws(
+    () => parseStreamMessageResponse({ id: "stream-1", remain_msg_len: -1 }),
+    /invalid remaining length/,
+  );
+});
+
+test("QQ API posts stream frames to the direct stream endpoint", async () => {
+  const originalFetch = globalThis.fetch;
+  const requests: Array<{ url: string; body: Record<string, unknown> }> = [];
+  globalThis.fetch = async (input, init) => {
+    const url = String(input);
+    if (url.includes("/getAppAccessToken")) {
+      return new Response(JSON.stringify({
+        access_token: "token",
+        expires_in: 7200,
+      }), { status: 200 });
+    }
+    requests.push({
+      url,
+      body: JSON.parse(String(init?.body)) as Record<string, unknown>,
+    });
+    return new Response(JSON.stringify({
+      id: "stream-1",
+      remain_msg_len: 999,
+    }), { status: 200 });
+  };
+
+  try {
+    const response = await new QQApi("app", "secret").sendStream({
+      targetId: "user/with/slash",
+      text: "Answer",
+      replyToId: "inbound",
+      sequence: 1,
+      index: 0,
+      state: 1,
+      contentType: "markdown",
+    });
+    assert.deepEqual(response, {
+      id: "stream-1",
+      remainMessageLength: 999,
+    });
+    assert.equal(
+      requests[0]?.url,
+      "https://api.sgroup.qq.com/v2/users/user%2Fwith%2Fslash/stream_messages",
+    );
+    assert.deepEqual(requests[0]?.body, {
+      input_mode: "replace",
+      input_state: 1,
+      index: 0,
+      content_type: "markdown",
+      content_raw: "Answer",
+      msg_id: "inbound",
+      msg_seq: 1,
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("interleaved turns retain their own inbound and stream message IDs", async () => {
+  const { sender, streams } = senderFixture();
+  const first = sender.createReply(inboundMessage("direct", "inbound-a", "user-a"));
+  const second = sender.createReply(inboundMessage("direct", "inbound-b", "user-b"));
+
+  await Promise.all([first.write("First"), second.write("Second")]);
+  await waitForStreamUpdate();
+  await Promise.all([first.write(" A"), second.write(" B")]);
+  await waitForStreamUpdate();
+  await Promise.all([first.finish(), second.finish()]);
+
+  const firstFrames = streams.filter((frame) => frame.replyToId === "inbound-a");
+  const secondFrames = streams.filter((frame) => frame.replyToId === "inbound-b");
+  assert.deepEqual(firstFrames.map((frame) => frame.targetId), [
+    "user-a", "user-a", "user-a",
+  ]);
+  assert.deepEqual(secondFrames.map((frame) => frame.targetId), [
+    "user-b", "user-b", "user-b",
+  ]);
+  assert.ok(firstFrames.slice(1).every(
+    (frame) => frame.streamMessageId === "stream-inbound-a",
+  ));
+  assert.ok(secondFrames.slice(1).every(
+    (frame) => frame.streamMessageId === "stream-inbound-b",
+  ));
 });
 
 test("raw and native modes preserve supported Markdown syntax", async () => {
@@ -393,6 +606,10 @@ test("send failures propagate without a duplicate fallback reply", async () => {
         attempts++;
         throw new Error("QQ rejected Markdown");
       },
+      sendStream: async () => {
+        attempts++;
+        throw new Error("QQ rejected stream");
+      },
       uploadMedia: async () => "unused",
       sendMedia: async () => "unused",
     },
@@ -401,9 +618,157 @@ test("send failures propagate without a duplicate fallback reply", async () => {
 
   await assert.rejects(
     sender.reply(inboundMessage(), "# One reply"),
-    /QQ rejected Markdown/,
+    /QQ rejected stream/,
   );
   assert.equal(attempts, 1);
+});
+
+test("stream update failures surface without sending a fallback reply", async () => {
+  let attempts = 0;
+  const { sender, sent } = senderFixture({}, async () => {
+    attempts++;
+    throw new Error("QQ stream unavailable");
+  });
+  const reply = sender.createReply(inboundMessage());
+
+  await reply.write("Partial");
+  await waitForStreamUpdate();
+  await assert.rejects(reply.finish(), /QQ stream unavailable/);
+  assert.equal(attempts, 1);
+  assert.equal(sent.length, 0);
+});
+
+test("stream truncates only after QQ reports true length exhaustion", async () => {
+  const totalCapacity = 100;
+  const { sender, streams } = senderFixture({}, async (input) => ({
+    id: `stream-${input.replyToId}`,
+    remainMessageLength: Math.max(
+      0,
+      totalCapacity - Array.from(input.text).length,
+    ),
+  }));
+  const reply = sender.createReply(inboundMessage());
+
+  await reply.write("start");
+  await waitForStreamUpdate();
+  await reply.write("x".repeat(200));
+  await waitForStreamUpdate();
+  await reply.finish();
+
+  const final = streams.at(-1)!;
+  assert.equal(final.state, 10);
+  assert.ok(Array.from(final.text).length <= totalCapacity);
+  assert.match(final.text, /Response truncated/);
+  assert.match(final.text, /✓ Complete/);
+  assert.ok(streams.every((frame) => frame.sequence === 1));
+});
+
+test("stream does not truncate content that fits with its completion marker", async () => {
+  const totalCapacity = 105;
+  const { sender, streams } = senderFixture({}, async (input) => ({
+    id: `stream-${input.replyToId}`,
+    remainMessageLength: Math.max(
+      0,
+      totalCapacity - Array.from(input.text).length,
+    ),
+  }));
+  const reply = sender.createReply(inboundMessage());
+
+  await reply.write("start");
+  await waitForStreamUpdate();
+  await reply.write("x".repeat(50));
+  await waitForStreamUpdate();
+  await reply.finish();
+
+  const final = streams.at(-1)!.text;
+  assert.match(final, /^startx{50}/);
+  assert.doesNotMatch(final, /truncated/i);
+  assert.match(final, /✓ Complete/);
+});
+
+test("stream preserves content by selecting a compact completion marker", async () => {
+  const totalCapacity = 15;
+  const { sender, streams } = senderFixture({}, async (input) => ({
+    id: `stream-${input.replyToId}`,
+    remainMessageLength: Math.max(
+      0,
+      totalCapacity - Array.from(input.text).length,
+    ),
+  }));
+  const reply = sender.createReply(inboundMessage());
+
+  await reply.write("start");
+  await waitForStreamUpdate();
+  await reply.write("x".repeat(8));
+  await reply.finish();
+
+  const final = streams.at(-1)!.text;
+  assert.equal(final, `start${"x".repeat(8)}✓`);
+  assert.doesNotMatch(final, /truncated/i);
+});
+
+test("stream length truncation keeps native fenced Markdown valid", async () => {
+  const totalCapacity = 100;
+  const { sender, streams } = senderFixture({}, async (input) => ({
+    id: `stream-${input.replyToId}`,
+    remainMessageLength: Math.max(
+      0,
+      totalCapacity - Array.from(input.text).length,
+    ),
+  }));
+  const reply = sender.createReply(inboundMessage());
+
+  await reply.write("Intro\n\n");
+  await waitForStreamUpdate();
+  await reply.write(`\`\`\`js\nconst value = "${"x".repeat(150)}";\n\`\`\``);
+  await reply.finish();
+
+  const final = streams.at(-1)!.text;
+  assert.ok(Array.from(final).length <= totalCapacity);
+  assert.match(final, /^Intro/);
+  assert.doesNotMatch(final, /```js(?![\s\S]*```)/);
+  assert.match(final, /⚠ Response truncated · ✓ Complete$/);
+});
+
+test("stream exhaustion uses only complete markers at tiny capacities", async () => {
+  const totalCapacity = 12;
+  const { sender, streams } = senderFixture({}, async (input) => ({
+    id: `stream-${input.replyToId}`,
+    remainMessageLength: Math.max(
+      0,
+      totalCapacity - Array.from(input.text).length,
+    ),
+  }));
+  const reply = sender.createReply(inboundMessage());
+
+  await reply.write("Intro");
+  await waitForStreamUpdate();
+  await reply.write(" content that will not fit");
+  await reply.finish();
+
+  const final = streams.at(-1)!.text;
+  assert.equal(Array.from(final).length, totalCapacity);
+  assert.equal(final, "Intro\n\n⚠ · ✓");
+  assert.doesNotMatch(final, /[_*`~]$/);
+});
+
+test("plain compatibility rendering waits for a prefix-safe final frame", async () => {
+  const { sender, streams } = senderFixture({ markdownMode: "plain" });
+  const reply = sender.createReply(inboundMessage());
+
+  await reply.write("**bold");
+  await waitForStreamUpdate();
+  assert.equal(streams.length, 0);
+  await reply.write("** and `code`");
+  await waitForStreamUpdate();
+  assert.equal(streams.length, 0);
+  await reply.finish();
+
+  assert.equal(streams.length, 2);
+  assert.equal(streams[0]!.contentType, "text");
+  assert.deepEqual(streams.map((frame) => frame.state), [1, 10]);
+  assert.equal(streams[0]!.text, "bold and code");
+  assert.equal(streams[1]!.text, "bold and code\n\n✓ Complete");
 });
 
 test("QQ artifact uploads and media payloads use rich-media messages", () => {
@@ -434,16 +799,14 @@ test("QQ artifact uploads and media payloads use rich-media messages", () => {
 });
 
 test("artifacts share reply sequencing and are deduplicated per turn", async () => {
-  const { sender, sent, uploads, media, operations } = senderFixture({
-    textChunkLimit: 200,
-    streamMinChars: 100,
-  });
+  const { sender, sent, streams, uploads, media, operations } = senderFixture();
   const reply = sender.createReply(inboundMessage());
   const video = artifact("video", "clip.mp4");
   const voice = artifact("voice", "voice.silk");
 
   await reply.write(`${"a".repeat(110)}\n\n`);
-  assert.deepEqual(sent.map(({ sequence }) => sequence), [1]);
+  await waitForStreamUpdate();
+  assert.deepEqual(streams.map(({ sequence }) => sequence), [1]);
 
   assert.deepEqual(await reply.sendArtifact(video, "**Clip**"), {
     alreadySent: false,
@@ -466,21 +829,27 @@ test("artifacts share reply sequencing and are deduplicated per turn", async () 
   assert.deepEqual(uploads.map(({ fileType }) => fileType), [2, 3]);
   assert.deepEqual(media.map(({ sequence }) => sequence), [2, 3]);
   assert.equal(media[0]?.caption, "Clip");
-  assert.deepEqual(sent.map(({ sequence }) => sequence), [1, 4]);
+  assert.equal(sent.length, 0);
+  assert.ok(streams.every(({ sequence }) => sequence === 1));
   assert.deepEqual(
     operations,
     [
-      "text:1",
+      "stream:1:0",
       "upload:video",
       "media:2",
       "upload:voice",
       "media:3",
-      "text:4",
+      "stream:1:1",
     ],
   );
 });
 
-function senderFixture(output: Partial<BotConfig["output"]> = {}) {
+function senderFixture(
+  output: Partial<BotConfig["output"]> = {},
+  streamResponse?: (
+    input: QQSendStreamInput,
+  ) => Promise<{ id: string; remainMessageLength?: number }>,
+) {
   const config = createInitialConfig({
     appId: "app",
     clientSecretFile: "/unused",
@@ -488,6 +857,7 @@ function senderFixture(output: Partial<BotConfig["output"]> = {}) {
   });
   config.output = { ...config.output, ...output };
   const sent: QQSendTextInput[] = [];
+  const streams: QQSendStreamInput[] = [];
   const uploads: QQUploadMediaInput[] = [];
   const media: QQSendMediaInput[] = [];
   const operations: string[] = [];
@@ -497,6 +867,16 @@ function senderFixture(output: Partial<BotConfig["output"]> = {}) {
         sent.push(input);
         operations.push(`text:${input.sequence}`);
         return `message-${sent.length}`;
+      },
+      sendStream: async (input) => {
+        streams.push(input);
+        operations.push(`stream:${input.sequence}:${input.index}`);
+        return streamResponse
+          ? streamResponse(input)
+          : {
+              id: `stream-${input.replyToId}`,
+              remainMessageLength: 10_000,
+            };
       },
       uploadMedia: async (input) => {
         uploads.push(input);
@@ -511,7 +891,7 @@ function senderFixture(output: Partial<BotConfig["output"]> = {}) {
     },
     () => config,
   );
-  return { sender, sent, uploads, media, operations };
+  return { sender, sent, streams, uploads, media, operations };
 }
 
 function artifact(digest: string, fileName: string): PreparedArtifact {
@@ -544,16 +924,22 @@ function artifact(digest: string, fileName: string): PreparedArtifact {
 
 function inboundMessage(
   chatType: QQInboundMessage["chatType"] = "direct",
+  messageId = "inbound",
+  targetId = "user",
 ): QQInboundMessage {
   return {
     accountId: "app",
     conversationId: "conversation",
     chatType,
     senderId: "user",
-    targetId: "user",
-    messageId: "inbound",
+    targetId,
+    messageId,
     timestamp: "2026-08-27T00:00:00Z",
     text: "hello",
     attachments: [],
   };
+}
+
+function waitForStreamUpdate(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 350));
 }
