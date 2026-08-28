@@ -15,6 +15,7 @@
   ],
   "scripts": {
     "build": "tsc",
+    "prepack": "npm run build",
     "start": "node dist/bin/qq-bot-acp.js",
     "test": "node --import tsx/esm --test tests/**/*.test.ts"
   },
@@ -33,5 +34,20 @@
   "engines": {
     "node": ">=20.0.0"
   },
-  "license": "MIT"
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/duzitong/qq-bot-acp.git"
+  },
+  "homepage": "https://github.com/duzitong/qq-bot-acp#readme",
+  "bugs": {
+    "url": "https://github.com/duzitong/qq-bot-acp/issues"
+  },
+  "license": "MIT",
+  "keywords": [
+    "qq",
+    "acp",
+    "agent-client-protocol",
+    "ai-agent",
+    "bridge"
+  ]
 }

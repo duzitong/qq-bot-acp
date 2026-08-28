@@ -1,0 +1,117 @@
+# Publish stable releases manually, plus a prerelease for every push to main.
+#
+# This package must exist on npm before trusted publishing can be configured.
+# Bootstrap it once from the reviewed release commit as npm user Eskibear:
+#   npm ci
+#   npm test
+#   npm publish --access public
+#
+# Then register this workflow as the package's trusted publisher:
+#   https://www.npmjs.com/package/qq-bot-acp/access
+#     publisher: GitHub Actions
+#     organization or user: duzitong
+#     repository: qq-bot-acp
+#     workflow: npm-publish.yml
+#     environment: (leave blank)
+#
+# No NPM_TOKEN repository secret is needed. Both jobs use the same workflow
+# filename because npm allows one trusted publisher entry per package.
+
+name: publish-npm
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: npm-publish-${{ github.event_name == 'workflow_dispatch' && 'latest' || 'next' }}
+  cancel-in-progress: false
+
+jobs:
+  publish-latest:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org/
+      - name: Verify release runs from main
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          if [ "$REF_NAME" != "main" ]; then
+            echo "::error::Stable releases must run from the main branch."
+            exit 1
+          fi
+      - name: Verify package version is unpublished
+        run: |
+          name="$(node -p "require('./package.json').name")"
+          version="$(node -p "require('./package.json').version")"
+          if npm view "${name}@${version}" version >/dev/null 2>&1; then
+            echo "::error::${name}@${version} is already published. Bump package.json before releasing."
+            exit 1
+          fi
+      - run: npm ci
+      - run: npm test
+      - name: Publish under `latest` dist-tag
+        run: npm publish --tag latest --provenance --access public
+
+  publish-next:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org/
+      - name: Compute prerelease version
+        id: version
+        run: |
+          name="$(node -p "require('./package.json').name")"
+          base="$(node -p "require('./package.json').version")"
+          base="${base%%-*}"
+          latest="$(npm view "${name}@latest" version)"
+          if [ "$base" = "$latest" ]; then
+            IFS='.' read -r major minor patch <<< "$base"
+            base="${major}.${minor}.$((patch + 1))"
+            echo "Base version ${latest} already published; bumped to ${base}"
+          fi
+          stamp="$(date -u +%Y%m%d%H%M)"
+          sha="$(git rev-parse --short=7 HEAD)"
+          version="${base}-next.${stamp}.${sha}"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "Computed prerelease version: ${version}"
+      - name: Check if version already published
+        id: check
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          name="$(node -p "require('./package.json').name")"
+          if npm view "${name}@${VERSION}" version >/dev/null 2>&1; then
+            echo "already=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::${name}@${VERSION} already published, skipping."
+          else
+            echo "already=false" >> "$GITHUB_OUTPUT"
+          fi
+      - run: npm ci
+        if: steps.check.outputs.already != 'true'
+      - run: npm test
+        if: steps.check.outputs.already != 'true'
+      - name: Set prerelease version in package.json
+        if: steps.check.outputs.already != 'true'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: npm version "${VERSION}" --no-git-tag-version --allow-same-version
+      - name: Publish under `next` dist-tag
+        if: steps.check.outputs.already != 'true'
+        run: npm publish --tag next --provenance --access public
