@@ -83,7 +83,8 @@ test("session configuration display focuses on current values and valid choices"
 
   assert.match(output, /\*\*Model\*\* \(id: `model`\)/);
   assert.match(output, /Current: Large \(`large`\)/);
-  assert.match(output, /Options: Small \(`small`\) \| Large \(`large`\)/);
+  assert.match(output, /Options: `small` \| `large`/);
+  assert.doesNotMatch(output, /Options: Small|Options: Large/);
   assert.match(output, /Current: High \(`high`\)/);
   assert.match(output, /Current: `false`/);
   assert.match(output, /Options: `true` \| `false`/);

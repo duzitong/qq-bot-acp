@@ -96,7 +96,9 @@ function describeCurrentValue(option: acp.SessionConfigOption): string {
 
 function describeChoices(option: acp.SessionConfigOption): string[] {
   if (option.type === "boolean") return ["`true`", "`false`"];
-  return flattenSelectOptions(option.options).map(describeChoice);
+  return flattenSelectOptions(option.options).map(
+    (choice) => `\`${choice.value}\``,
+  );
 }
 
 function flattenSelectOptions(
