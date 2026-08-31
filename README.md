@@ -234,7 +234,9 @@ Session options belong to the current QQ conversation and configured agent:
 The keys come from the active agent's advertised ACP
 `SessionConfigOption[]`. Options are validated through
 `session/set_config_option`, persisted, and reapplied when that conversation's
-ACP session is recreated. Send a normal message before setting an option.
+ACP session is recreated. `/session-config` and `/sc` show each option's
+current value, valid choices, and the exact config ID to use. Send a normal
+message before setting an option.
 
 Other bridge commands:
 
