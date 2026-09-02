@@ -10,7 +10,11 @@ import {
 import { ConfigStore } from "../config/store.js";
 import { QQSender } from "../qq/sender.js";
 import type { QQInboundMessage } from "../qq/types.js";
-import { parseControlCommand, type ControlCommand } from "./commands.js";
+import {
+  formatSessionConfig,
+  parseControlCommand,
+  type ControlCommand,
+} from "./commands.js";
 
 export class BotController {
   constructor(
@@ -165,7 +169,7 @@ export class BotController {
     try {
       if (command.operation === "show") {
         const state = await this.sessions.getSessionConfig(message.conversationId);
-        await this.sender.reply(message, json(state));
+        await this.sender.reply(message, formatSessionConfig(state));
         return;
       }
       if (command.operation === "reset") {
