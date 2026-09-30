@@ -72,7 +72,12 @@ export class QQSender {
   }
 
   async reply(message: QQInboundMessage, text: string): Promise<void> {
-    const reply = this.createReply(message);
+    const reply = new BufferedQQReply(
+      this.api,
+      message,
+      { ...this.getConfig().output, streamResponses: false },
+      this.log,
+    );
     await reply.write(text);
     await reply.finish();
   }
