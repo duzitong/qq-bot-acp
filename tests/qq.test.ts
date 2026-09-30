@@ -167,6 +167,69 @@ match(x,g)=\text{x与猜测g在相同位置上数字相同的个数}
   );
 });
 
+test("complete replies bypass streaming while preserving formatting and chunk routing", async () => {
+  const response = `# Session config\n\n${"Available option\n\n".repeat(16)}`;
+  for (const chatType of ["direct", "group", "channel"] as const) {
+    for (const markdownMode of ["native", "raw", "plain"] as const) {
+      const { sender, sent, streams } = senderFixture({
+        markdownMode,
+        textChunkLimit: 180,
+        streamMinChars: 100,
+      });
+      const message = inboundMessage(chatType, "command", "command-target");
+
+      await sender.reply(message, response);
+
+      const effectiveMode =
+        chatType === "channel" && markdownMode === "native"
+          ? "plain"
+          : markdownMode;
+      const rendered = effectiveMode === "plain"
+        ? renderMarkdownForQQ(response)
+        : effectiveMode === "native"
+          ? renderNativeMarkdownForQQ(response)
+          : response.trim();
+      const chunks = effectiveMode === "plain"
+        ? splitText(rendered, 180)
+        : splitMarkdown(rendered, 180);
+      assert.ok(chunks.length > 1);
+      assert.deepEqual(streams, []);
+      assert.deepEqual(sent, chunks.map((text, index) => ({
+        chatType,
+        targetId: "command-target",
+        text,
+        replyToId: "command",
+        sequence: index + 1,
+        markdown: effectiveMode === "native",
+      })));
+      assert.ok(sent.every(({ text }) => text.length <= 180));
+    }
+  }
+});
+
+test("complete replies do not disable streaming for subsequent agent replies", async () => {
+  const { sender, sent, streams } = senderFixture();
+
+  await sender.reply(inboundMessage("direct", "command"), "Current config");
+  assert.equal(sent.length, 1);
+  assert.equal(streams.length, 0);
+
+  const reply = sender.createReply(inboundMessage("direct", "agent"));
+  await reply.write("Partial");
+  await reply.flush();
+  assert.equal(streams.length, 1);
+  assert.equal(streams[0]!.state, 1);
+  await reply.write(" answer");
+  await reply.finish();
+
+  assert.equal(sent.length, 1);
+  assert.deepEqual(streams.map(({ replyToId, state }) => ({ replyToId, state })), [
+    { replyToId: "agent", state: 1 },
+    { replyToId: "agent", state: 10 },
+  ]);
+  assert.match(streams[1]!.text, /^Partial answer/);
+});
+
 test("direct replies use one official QQ stream from first update through completion", async () => {
   const { sender, sent, streams } = senderFixture();
   const reply = sender.createReply(inboundMessage());
@@ -415,18 +478,22 @@ test("group fallback batching splits lists only between top-level items", async 
   assert.deepEqual(sent.map(({ sequence }) => sequence), [1, 2]);
 });
 
-test("QQ passive replies are capped and visibly truncated", async () => {
-  const { sender, sent } = senderFixture({
-    textChunkLimit: 100,
-    streamResponses: false,
-  });
+test("complete replies retain passive reply limits with streaming enabled", async () => {
+  for (const chatType of ["direct", "group", "channel"] as const) {
+    const { sender, sent, streams } = senderFixture({ textChunkLimit: 100 });
 
-  await sender.reply(inboundMessage("group"), "x".repeat(650));
+    await sender.reply(inboundMessage(chatType), "x".repeat(650));
 
-  assert.equal(sent.length, 5);
-  assert.deepEqual(sent.map((message) => message.sequence), [1, 2, 3, 4, 5]);
-  assert.match(sent[4]!.text, /Response truncated/);
-  assert.ok(sent.every((message) => message.text.length <= 100));
+    const maximum = chatType === "direct" ? 4 : 5;
+    assert.equal(sent.length, maximum);
+    assert.deepEqual(
+      sent.map(({ sequence }) => sequence),
+      Array.from({ length: maximum }, (_, index) => index + 1),
+    );
+    assert.match(sent.at(-1)!.text, /Response truncated/);
+    assert.ok(sent.every(({ text }) => text.length <= 100));
+    assert.equal(streams.length, 0);
+  }
 });
 
 test("non-streaming direct fallback uses the official four-reply limit", async () => {
@@ -435,7 +502,10 @@ test("non-streaming direct fallback uses the official four-reply limit", async (
     streamResponses: false,
   });
 
-  await sender.reply(inboundMessage(), "x".repeat(650));
+  const reply = sender.createReply(inboundMessage());
+  await reply.write("x".repeat(650));
+  assert.equal(sent.length, 0);
+  await reply.finish();
 
   assert.equal(sent.length, 4);
   assert.deepEqual(sent.map((message) => message.sequence), [1, 2, 3, 4]);
@@ -445,7 +515,6 @@ test("non-streaming direct fallback uses the official four-reply limit", async (
 test("truncation keeps the final native fenced-code chunk valid", async () => {
   const { sender, sent } = senderFixture({
     textChunkLimit: 100,
-    streamResponses: false,
   });
   const response = [
     "```js",
@@ -626,7 +695,6 @@ test("raw and native modes preserve supported Markdown syntax", async () => {
   for (const markdownMode of ["raw", "native"] as const) {
     const { sender, sent } = senderFixture({
       markdownMode,
-      streamResponses: false,
     });
     await sender.reply(inboundMessage(), response);
 
@@ -637,7 +705,7 @@ test("raw and native modes preserve supported Markdown syntax", async () => {
 });
 
 test("channels use the explicit plain-text compatibility path", async () => {
-  const { sender, sent } = senderFixture({ streamResponses: false });
+  const { sender, sent } = senderFixture();
   await sender.reply(
     inboundMessage("channel"),
     "# Title\n\n**Bold** and `code`.\n\n```sh\necho ok\n```",
@@ -677,7 +745,7 @@ test("send failures propagate without a duplicate fallback reply", async () => {
 
   await assert.rejects(
     sender.reply(inboundMessage(), "# One reply"),
-    /QQ rejected stream/,
+    /QQ rejected Markdown/,
   );
   assert.equal(attempts, 1);
 });

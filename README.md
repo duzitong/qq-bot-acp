@@ -130,7 +130,7 @@ processes so each conversation starts against the new agent.
 
 ## Output formatting and streaming
 
-Direct-chat responses use QQ's official
+With streaming enabled, direct-chat ACP agent responses use QQ's official
 [`/v2/users/{openid}/stream_messages`](https://bot.q.qq.com/wiki/develop/api-v2/autogen/api/v2_users_user_openid_stream_messages.post.html)
 API. Each inbound QQ message owns one independent response stream: every
 update retains that message's original `msg_id` and `msg_seq`, then reuses the
@@ -148,6 +148,13 @@ remain on valid boundaries. QQ permits four passive replies per inbound direct
 message and five per inbound group message. Text streams/messages and explicit
 artifacts share that per-message sequence budget without rebinding a response
 to a newer inbound message.
+
+Complete bridge replies, including `/sc`, `/session-config`, `/config`, and
+command acknowledgements or errors, use the normal message API immediately,
+even when `output.streamResponses` is enabled. They keep the configured
+formatting, `output.textChunkLimit`, and passive reply limits without replaying
+known text through QQ's streaming queue. `/test-streaming` is the explicit
+exception and still uses the streaming transport.
 
 The bridge does not split a direct stream at the legacy 2,000-character chunk
 size. QQ's `remain_msg_len` reports characters still pending for server-side
@@ -189,9 +196,10 @@ conversations, or to `"raw"` to send unformatted text payloads. Set
 `output.streamResponses` to `false` to wait for turn completion before
 replying through the normal message API. For backward compatibility,
 `output.textChunkLimit` and `output.streamMinChars` remain valid configuration
-keys, but they apply only to non-streaming group/channel replies and to the
-direct fallback selected by `output.streamResponses: false`; official direct
-streams ignore both settings. Plain compatibility mode renders only the final
+keys. `output.textChunkLimit` applies to complete bridge replies and buffered
+agent replies; `output.streamMinChars` controls progressive group/channel agent
+batching. Official direct streams ignore both settings. Plain compatibility
+mode renders only the final
 direct stream frame because stripping Markdown incrementally could rewrite a
 prefix after a delimiter closes; native and raw modes update progressively.
 
