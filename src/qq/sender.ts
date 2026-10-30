@@ -98,6 +98,7 @@ export class QQSender {
         streamResponses: true,
       },
       this.log,
+      true,
     );
     const deltas = [
       "# QQ Streaming Diagnostic\n\n1. First generating frame accepted.",
@@ -126,6 +127,7 @@ class BufferedQQReply implements QQReplyStream {
   private streamLastText = "";
   private streamTimer?: ReturnType<typeof setTimeout>;
   private streamError?: unknown;
+  private streamFailed = false;
   private readonly streamTrace = nextStreamTrace++;
 
   constructor(
@@ -133,6 +135,7 @@ class BufferedQQReply implements QQReplyStream {
     private readonly message: QQInboundMessage,
     private readonly output: BotConfig["output"],
     private readonly log: (message: string) => void,
+    private readonly surfaceStreamErrors = false,
   ) {}
 
   write(text: string): Promise<void> {
@@ -156,11 +159,14 @@ class BufferedQQReply implements QQReplyStream {
 
   private async writeNow(text: string): Promise<void> {
     if (this.finished) throw new Error("Cannot write to a finished QQ reply");
-    if (this.streamError !== undefined) throw this.streamError;
     if (!text) return;
     this.buffer += text;
     if (!this.output.streamResponses) return;
     if (this.usesOfficialStream()) {
+      if (this.streamFailed) return;
+      if (this.surfaceStreamErrors && this.streamError !== undefined) {
+        throw this.streamError;
+      }
       this.scheduleStreamUpdate();
       return;
     }
@@ -169,9 +175,12 @@ class BufferedQQReply implements QQReplyStream {
 
   private async flushNow(): Promise<void> {
     if (this.finished) throw new Error("Cannot flush a finished QQ reply");
-    if (this.streamError !== undefined) throw this.streamError;
+    if (this.surfaceStreamErrors && this.streamError !== undefined) {
+      throw this.streamError;
+    }
     if (this.usesOfficialStream()) {
       this.clearStreamTimer();
+      if (this.streamFailed) return;
       await this.flushStreamUpdate();
       return;
     }
@@ -194,7 +203,7 @@ class BufferedQQReply implements QQReplyStream {
         `At most ${MAX_ARTIFACTS_PER_TURN} artifacts can be sent in one QQ turn`,
       );
     }
-    if (this.usesOfficialStream()) {
+    if (this.usesOfficialStream() && !this.streamFailed) {
       await this.flushStreamUpdate();
     }
     if (this.sent >= this.maxPassiveReplies() - FINAL_REPLY_RESERVE) {
@@ -224,10 +233,27 @@ class BufferedQQReply implements QQReplyStream {
   private async finishNow(): Promise<void> {
     if (this.finished) return;
     this.clearStreamTimer();
-    if (this.streamError !== undefined) throw this.streamError;
+    if (this.surfaceStreamErrors && this.streamError !== undefined) {
+      throw this.streamError;
+    }
 
     if (this.usesOfficialStream()) {
-      await this.finishOfficialStream();
+      if (this.streamFailed) {
+        await this.deliverStreamFallback();
+        this.finished = true;
+        return;
+      }
+      try {
+        await this.finishOfficialStream();
+      } catch (error) {
+        if (this.surfaceStreamErrors) throw error;
+        this.streamFailed = true;
+        this.streamError = error;
+        this.log(
+          `QQ stream completion failed trace=${this.streamTrace} error=${streamErrorCategory(error)}; delivering the reply without streaming`,
+        );
+        await this.deliverStreamFallback();
+      }
       this.finished = true;
       return;
     }
@@ -298,12 +324,46 @@ class BufferedQQReply implements QQReplyStream {
   }
 
   private async flushStreamUpdate(): Promise<void> {
-    if (this.streamError !== undefined) throw this.streamError;
+    if (this.streamFailed) return;
     const desired = this.renderStreamText();
     if (!desired || desired === this.streamLastText) return;
 
-    this.assertStreamPrefix(desired);
-    await this.sendStreamFrame(desired, 1);
+    try {
+      this.assertStreamPrefix(desired);
+      await this.sendStreamFrame(desired, 1);
+    } catch (error) {
+      if (this.surfaceStreamErrors) throw error;
+      this.streamFailed = true;
+      this.streamError = error;
+      this.log(
+        `QQ stream update failed trace=${this.streamTrace} error=${streamErrorCategory(error)}; delivering the reply without streaming`,
+      );
+    }
+  }
+
+  /**
+   * Sends everything the stream never displayed, plus the completion marker,
+   * through the ordinary message API. The streamed prefix is not repeated.
+   */
+  private async deliverStreamFallback(): Promise<void> {
+    const rendered = this.render(this.buffer);
+    this.buffer = "";
+    const shown = this.streamLastText;
+    const remaining = (
+      shown && rendered.startsWith(shown)
+        ? rendered.slice(shown.length)
+        : rendered
+    ).replace(/^\s+/, "");
+    const body = remaining
+      ? `${remaining}${STREAM_COMPLETION_MARKER}`
+      : STREAM_COMPLETION_MARKER.trim();
+    const chunks = capReplyChunks(
+      this.split(body),
+      this.maxPassiveReplies() - this.sent,
+      this.output.textChunkLimit,
+      (text, limit) => this.split(text, limit),
+    );
+    await this.sendChunks(chunks);
   }
 
   private async finishOfficialStream(): Promise<void> {
