@@ -750,7 +750,7 @@ test("send failures propagate without a duplicate fallback reply", async () => {
   assert.equal(attempts, 1);
 });
 
-test("stream update failures surface without sending a fallback reply", async () => {
+test("stream update failures degrade to a complete ordinary reply", async () => {
   let attempts = 0;
   const { sender, sent, logs } = senderFixture({}, async () => {
     attempts++;
@@ -760,14 +760,27 @@ test("stream update failures surface without sending a fallback reply", async ()
 
   await reply.write("Partial");
   await waitForStreamUpdate();
-  await assert.rejects(reply.finish(), /QQ stream unavailable/);
+  await reply.finish();
+
   assert.equal(attempts, 1);
-  assert.equal(sent.length, 0);
-  assert.match(logs.at(-1)!, /error=request-error$/);
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0]!.text, "Partial\n\n🔚");
+  assert.match(logs.at(-1)!, /error=request-error/);
   assert.doesNotMatch(logs.at(-1)!, /sensitive response/);
 });
 
-test("an explicit QQ length rejection surfaces without local truncation", async () => {
+test("streaming diagnostics surface a failed frame instead of hiding it", async () => {
+  const { sender } = senderFixture({}, async () => {
+    throw new Error("QQ stream send failed (400; code 40054005)");
+  });
+
+  await assert.rejects(
+    sender.runStreamingDiagnostic(inboundMessage(), async () => {}),
+    /code 40054005/,
+  );
+});
+
+test("a mid-stream failure delivers the undisplayed tail with the end marker", async () => {
   const { sender, sent, streams, logs } = senderFixture({}, async (input) => {
     if (input.index === 1) {
       throw new Error("QQ stream send failed (400; code 40054007)");
@@ -783,12 +796,28 @@ test("an explicit QQ length rejection surfaces without local truncation", async 
   await waitForStreamUpdate();
   await reply.write("x".repeat(200));
   await waitForStreamUpdate();
+  await reply.finish();
 
-  await assert.rejects(reply.finish(), /code 40054007/);
-  assert.equal(sent.length, 0);
   assert.deepEqual(streams.map(({ index }) => index), [0, 1]);
-  assert.match(streams[1]!.text, /^startx{200}$/);
-  assert.match(logs.at(-1)!, /error=http-400$/);
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0]!.text, `${"x".repeat(200)}\n\n🔚`);
+  assert.equal(sent[0]!.replyToId, "inbound");
+  assert.equal(sent[0]!.sequence, 2);
+  assert.match(logs.at(-1)!, /error=http-400/);
+});
+
+test("a first-frame failure delivers the whole reply with the end marker", async () => {
+  const { sender, sent } = senderFixture({}, async () => {
+    throw new Error("QQ stream send failed (400; code 40054005)");
+  });
+  const reply = sender.createReply(inboundMessage());
+
+  await reply.write("Hello world");
+  await waitForStreamUpdate();
+  await reply.finish();
+
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0]!.text, "Hello world\n\n🔚");
 });
 
 test("plain compatibility rendering waits for a prefix-safe final frame", async () => {

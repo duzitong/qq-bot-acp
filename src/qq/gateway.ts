@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import WebSocket from "ws";
 import { atomicWriteJson } from "../config/store.js";
 import { QQApi } from "./api.js";
+import { InboundDeduplicator } from "./dedup.js";
 import type {
   QQAttachment,
   QQGatewayEvent,
@@ -29,6 +30,7 @@ export class QQGateway {
   private reconnectAttempt = 0;
   private state: GatewayState;
   private payloadChain = Promise.resolve();
+  private readonly inboundDedup = new InboundDeduplicator();
 
   constructor(
     private readonly api: QQApi,
@@ -176,6 +178,10 @@ export class QQGateway {
     if (!type || typeof data !== "object" || data === null) return;
     const message = normalizeInbound(type, data as Record<string, unknown>, this.api.appId);
     if (!message) return;
+    if (this.inboundDedup.isDuplicate(message.messageId)) {
+      this.log(`Ignoring duplicate QQ message ${message.messageId}`);
+      return;
+    }
     void this.onMessage(message).catch((error) => {
       this.log(`Inbound message failed: ${String(error)}`);
     });
