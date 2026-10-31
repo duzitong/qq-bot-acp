@@ -132,22 +132,37 @@ processes so each conversation starts against the new agent.
 
 With streaming enabled, direct-chat ACP agent responses use QQ's official
 [`/v2/users/{openid}/stream_messages`](https://bot.q.qq.com/wiki/develop/api-v2/autogen/api/v2_users_user_openid_stream_messages.post.html)
-API. Each inbound QQ message owns one independent response stream: every
-update retains that message's original `msg_id` and `msg_seq`, then reuses the
-`stream_msg_id` returned by QQ's first frame. ACP deltas are accumulated and
-sent as throttled full-document `replace` updates, and the final update sets
-`input_state: 10` with a single `🔚` marker in the same message. Fenced
+API. Each inbound QQ message owns an independent chain of response streams.
+Within each stream, updates retain the original inbound `msg_id`, one
+`msg_seq`, and the `stream_msg_id` returned by QQ's first frame. ACP deltas are
+accumulated and sent as throttled full-document `replace` updates for that
+stream. The final update sets `input_state: 10` with a single `🔚` marker. Fenced
 code and explicit LaTeX that span ACP deltas are held until structurally
 complete so an update never rewrites a prefix QQ may already have displayed.
+
+An active stream rotates after **nine minutes**, before the observed
+ten-minute stream timeout, even during a silent tool call. The old stream
+ends with `input_state: 10` and `⏩` instead of `🔚`; a new stream starts with a
+fresh `msg_seq`, no `stream_msg_id`, and `index: 0`, still replying to the same
+original inbound message. Only unsent content continues in the new stream;
+incomplete code/LaTeX stays buffered rather than being dropped or split.
+The new stream initially shows `…`, which remains as a prefix when more text
+arrives to preserve QQ's append-only contract. Its nine-minute deadline starts
+at its first request, not the latest update. Timers stop when the turn ends or
+aborts, and rotation failures surface without retries or duplicate fallbacks.
 
 QQ currently exposes `stream_messages` for direct/C2C chats only. Group chats
 explicitly do not support streaming parameters, and channel replies use the
 normal channel message API. Those scenarios retain Markdown-aware progressive
 batching: fenced code blocks, top-level list items, and nested list content
-remain on valid boundaries. QQ permits four passive replies per inbound direct
-message and five per inbound group message. Text streams/messages and explicit
-artifacts share that per-message sequence budget without rebinding a response
-to a newer inbound message.
+remain on valid boundaries. The bridge keeps its five-reply group/channel
+limits, but no longer imposes the historical four-reply direct-chat cap:
+live C2C probes delivered at least twenty replies to one inbound message.
+That is not a guarantee of unlimited replies. Actual QQ quota or reply-window
+rejections are surfaced, and rotating streams does not extend the original
+inbound message's reply window. Text streams/messages and explicit artifacts
+share a per-message sequence allocator without rebinding a response to a newer
+inbound message.
 
 Complete bridge replies, including `/sc`, `/session-config`, `/config`, and
 command acknowledgements or errors, use the normal message API immediately,
@@ -224,9 +239,10 @@ to 20 MiB and can be sent only in direct or group chats. Calls are accepted only
 while handling an active QQ message, duplicate content is sent once per turn,
 and at most two artifacts can be sent per turn. Artifacts remain separate
 rich-media replies and use their own sequence numbers, while all frames in a
-direct text stream retain one sequence number; the combined identities remain
-within QQ's four-reply direct or five-reply group budget. The configured ACP
-agent must advertise HTTP MCP support.
+direct text stream retain one sequence number. Each rotated stream consumes
+the next available sequence, including any intervening artifacts. Group replies
+retain their five-reply budget; direct replies rely on QQ to enforce its actual
+quota. The configured ACP agent must advertise HTTP MCP support.
 
 ## ACP session configuration
 

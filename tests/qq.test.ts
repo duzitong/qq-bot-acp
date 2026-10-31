@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import test, { type TestContext } from "node:test";
 import { createInitialConfig, type BotConfig } from "../src/config/schema.js";
 import {
   buildMediaUploadBody,
@@ -23,6 +23,8 @@ import {
 } from "../src/qq/format.js";
 import type { PreparedArtifact } from "../src/artifacts/file.js";
 import type { QQInboundMessage } from "../src/qq/types.js";
+
+const NINE_MINUTES_MS = 9 * 60_000;
 
 test("QQ replies split at natural boundaries", () => {
   assert.deepEqual(splitText("one two three", 7), ["one two", "three"]);
@@ -362,6 +364,326 @@ test("remain_msg_len is pending telemetry and never stops a QQ stream", async ()
   assert.match(streams.at(-1)!.text, /🔚$/);
 });
 
+test("direct streams rotate after exactly nine minutes, even while idle", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: 0 });
+  const { sender, sent, streams } = senderFixture();
+  const reply = sender.createReply(inboundMessage());
+
+  await tickTimers(t, NINE_MINUTES_MS * 2);
+  assert.equal(streams.length, 0);
+  await reply.write("First part");
+  await reply.flush();
+  await tickTimers(t, NINE_MINUTES_MS - 1);
+  assert.equal(streams.length, 1);
+  await tickTimers(t, 1);
+
+  assert.deepEqual(
+    streams.map(({ sequence, index, state, text, streamMessageId }) => ({
+      sequence, index, state, text, streamMessageId,
+    })),
+    [
+      { sequence: 1, index: 0, state: 1, text: "First part", streamMessageId: undefined },
+      { sequence: 1, index: 1, state: 10, text: "First part\n\n⏩", streamMessageId: "stream-inbound" },
+      { sequence: 2, index: 0, state: 1, text: "…", streamMessageId: undefined },
+    ],
+  );
+  await reply.write("Second part");
+  await reply.flush();
+  await reply.finish();
+  await reply.finish();
+
+  assert.deepEqual(streams.slice(3).map(({ sequence, index, state, text, streamMessageId }) => ({
+    sequence, index, state, text, streamMessageId,
+  })), [
+    { sequence: 2, index: 1, state: 1, text: "…\n\nSecond part", streamMessageId: "stream-inbound-2" },
+    { sequence: 2, index: 2, state: 10, text: "…\n\nSecond part\n\n🔚", streamMessageId: "stream-inbound-2" },
+  ]);
+  assert.ok(streams.every(({ targetId, replyToId }) => targetId === "user" && replyToId === "inbound"));
+  assert.equal(sent.length, 0);
+  await tickTimers(t, NINE_MINUTES_MS * 2);
+  assert.equal(streams.length, 5);
+});
+
+test("stream updates do not extend rotation deadlines and idle continuations rotate again", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: 0 });
+  const { sender, streams } = senderFixture();
+  const reply = sender.createReply(inboundMessage());
+
+  await reply.write("First");
+  await reply.flush();
+  await tickTimers(t, 8 * 60_000);
+  await reply.write(" update");
+  await reply.flush();
+  await tickTimers(t, 60_000 - 1);
+  assert.equal(streams.length, 2);
+  await tickTimers(t, 1);
+  assert.equal(streams[2]!.text, "First update\n\n⏩");
+  assert.equal(streams[3]!.text, "…");
+
+  await tickTimers(t, NINE_MINUTES_MS - 1);
+  assert.equal(streams.length, 4);
+  await tickTimers(t, 1);
+  assert.deepEqual(streams.slice(4).map(({ sequence, index, state, text }) => ({
+    sequence, index, state, text,
+  })), [
+    { sequence: 2, index: 1, state: 10, text: "…\n\n⏩" },
+    { sequence: 3, index: 0, state: 1, text: "…" },
+  ]);
+  await reply.finish();
+  assert.equal(streams.at(-1)!.text, "…\n\n🔚");
+});
+
+test("rotation counts first-request latency rather than starting at its acknowledgement", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: 0 });
+  let acceptFirst!: () => void;
+  const firstResponse = new Promise<void>((resolve) => { acceptFirst = resolve; });
+  const { sender, streams } = senderFixture({}, async (input) => {
+    if (input.sequence === 1 && input.index === 0) await firstResponse;
+    return { id: `stream-${input.sequence}` };
+  });
+  const reply = sender.createReply(inboundMessage());
+  await reply.write("First");
+  const flushing = reply.flush();
+  await tickTimers(t, 0);
+  assert.equal(streams.length, 1);
+  await tickTimers(t, 60_000);
+  acceptFirst();
+  await flushing;
+
+  await tickTimers(t, 8 * 60_000 - 1);
+  assert.equal(streams.length, 1);
+  await tickTimers(t, 1);
+  assert.deepEqual(streams.map(({ sequence, state }) => ({ sequence, state })), [
+    { sequence: 1, state: 1 },
+    { sequence: 1, state: 10 },
+    { sequence: 2, state: 1 },
+  ]);
+  await reply.finish();
+});
+
+test("rotation carries unfinished Markdown and LaTeX into the next stream without replaying text", async (t) => {
+  const cases = [
+    { opening: "```ts\nconst answer =", closing: " 42;\n```", rendered: "```ts\nconst answer = 42;\n```" },
+    { opening: "\\[\nx^", closing: "2\n\\]", rendered: "x²" },
+    { opening: "\\", closing: "(x^2\\)", rendered: "x²" },
+    { opening: "`unfin", closing: "ished`", rendered: "`unfinished`" },
+    { opening: "$x$", closing: " + 1", rendered: "x + 1" },
+  ];
+  for (const markdownMode of ["native", "raw"] as const) {
+    for (const { opening, closing, rendered } of cases) {
+      await t.test(`${markdownMode}: ${JSON.stringify(opening)}`, async (t) => {
+        t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: 0 });
+        const { sender, streams } = senderFixture({ markdownMode });
+        const reply = sender.createReply(inboundMessage());
+        await reply.write(`Before 😀\n\n${opening}`);
+        await reply.flush();
+        assert.equal(streams[0]!.text, "Before 😀");
+        await tickTimers(t, NINE_MINUTES_MS);
+        assert.equal(streams[1]!.text, "Before 😀\n\n⏩");
+        await reply.write(`${closing}\n\nAfter`);
+        await reply.finish();
+
+        const body = markdownMode === "raw" ? opening + closing : rendered;
+        assert.equal(streams.at(-1)!.text, `…\n\n${body}\n\nAfter\n\n🔚`);
+        assert.equal(streams.at(-1)!.sequence, 2);
+        assert.equal(streams.at(-1)!.contentType, markdownMode === "native" ? "markdown" : "text");
+        assert.doesNotMatch(streams.at(-1)!.text, /Before/);
+      });
+    }
+  }
+});
+
+test("repeated rotations and artifacts share sequences beyond four replies", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: 0 });
+  const { sender, streams, media, sent } = senderFixture();
+  const reply = sender.createReply(inboundMessage());
+
+  for (let part = 1; part <= 5; part++) {
+    await reply.write(`Part ${part}`);
+    await reply.flush();
+    if (part <= 2) await reply.sendArtifact(artifact(`file-${part}`, `file-${part}.png`));
+    if (part < 5) await tickTimers(t, NINE_MINUTES_MS);
+  }
+  await reply.finish();
+
+  assert.deepEqual(media.map(({ sequence }) => sequence), [2, 4]);
+  const starts = streams.filter(({ index }) => index === 0);
+  assert.deepEqual(starts.map(({ sequence }) => sequence), [1, 3, 5, 6, 7]);
+  assert.ok(starts.every(({ streamMessageId }) => streamMessageId === undefined));
+  const endings = streams.filter(({ state }) => state === 10);
+  assert.deepEqual(endings.map(({ text }) => text), [
+    "Part 1\n\n⏩",
+    "…\n\nPart 2\n\n⏩",
+    "…\n\nPart 3\n\n⏩",
+    "…\n\nPart 4\n\n⏩",
+    "…\n\nPart 5\n\n🔚",
+  ]);
+  assert.equal(new Set(endings.map(({ streamMessageId }) => streamMessageId)).size, 5);
+  for (const { sequence } of starts) {
+    const frames = streams.filter((frame) => frame.sequence === sequence);
+    assert.deepEqual(frames.map(({ index }) => index), frames.map((_, index) => index));
+    assert.ok(frames.every(({ replyToId }) => replyToId === "inbound"));
+    assert.ok(frames.slice(1).every(({ streamMessageId }) => streamMessageId === frames[1]!.streamMessageId));
+    assert.ok(frames.slice(1).every(({ text }, index) => text.startsWith(frames[index]!.text)));
+  }
+  assert.equal(sent.length, 0);
+});
+
+test("interleaved turns rotate independently without rebinding to the latest inbound message", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: 0 });
+  const { sender, streams } = senderFixture();
+  const first = sender.createReply(inboundMessage("direct", "first"));
+  await first.write("First");
+  await first.flush();
+  await tickTimers(t, 60_000);
+  const second = sender.createReply(inboundMessage("direct", "second"));
+  await second.write("Second");
+  await second.flush();
+  await tickTimers(t, 8 * 60_000);
+
+  assert.deepEqual(streams.filter(({ index }) => index === 0).map(({ replyToId, sequence }) => ({
+    replyToId, sequence,
+  })), [
+    { replyToId: "first", sequence: 1 },
+    { replyToId: "second", sequence: 1 },
+    { replyToId: "first", sequence: 2 },
+  ]);
+  await tickTimers(t, 60_000);
+  assert.equal(streams.at(-1)!.replyToId, "second");
+  assert.equal(streams.at(-1)!.sequence, 2);
+  await Promise.all([first.finish(), second.finish()]);
+  assert.deepEqual(streams.slice(-2).map(({ replyToId, streamMessageId }) => ({
+    replyToId, streamMessageId,
+  })), [
+    { replyToId: "first", streamMessageId: "stream-first-2" },
+    { replyToId: "second", streamMessageId: "stream-second-2" },
+  ]);
+});
+
+test("rotation failures stop timers and surface without retries or fallback replies", async (t) => {
+  for (const phase of ["close-old", "open-new"] as const) {
+    await t.test(phase, async (t) => {
+      t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: 0 });
+      const { sender, streams, sent, uploads, logs } = senderFixture({}, async (input) => {
+        if (
+          (phase === "close-old" && input.state === 10) ||
+          (phase === "open-new" && input.sequence === 2)
+        ) {
+          throw new Error("QQ stream send failed (400; code 40054007)");
+        }
+        return { id: `stream-${input.sequence}` };
+      });
+      const reply = sender.createReply(inboundMessage());
+      await reply.write("Partial");
+      await reply.flush();
+      await tickTimers(t, NINE_MINUTES_MS);
+      const attempts = phase === "close-old" ? 2 : 3;
+      assert.equal(streams.length, attempts);
+      await assert.rejects(reply.write("Late"), /code 40054007/);
+      await assert.rejects(reply.flush(), /code 40054007/);
+      await assert.rejects(reply.sendArtifact(artifact("file", "file.png")), /code 40054007/);
+      await assert.rejects(reply.finish(), /code 40054007/);
+      await tickTimers(t, NINE_MINUTES_MS * 2);
+      assert.equal(streams.length, attempts);
+      assert.equal(sent.length, 0);
+      assert.equal(uploads.length, 0);
+      assert.match(logs.at(-1)!, /error=http-400$/);
+      assert.ok(logs.every((entry) => !entry.includes("Partial")));
+    });
+  }
+});
+
+test("disposing a reply stops its timers and prevents a new stream after an in-flight close", async (t) => {
+  for (const phase of ["opening", "idle", "closing", "finishing"]) {
+    await t.test(phase, async (t) => {
+      t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: 0 });
+      let acceptRequest!: () => void;
+      const response = new Promise<void>((resolve) => { acceptRequest = resolve; });
+      const { sender, streams } = senderFixture({}, async (input) => {
+        if (
+          ((phase === "opening" || phase === "finishing") && input.index === 0) ||
+          (phase === "closing" && input.state === 10)
+        ) {
+          await response;
+        }
+        return { id: `stream-${input.sequence}` };
+      });
+      const reply = sender.createReply(inboundMessage());
+      await reply.write("Partial");
+      const sending = phase === "finishing" ? reply.finish() : reply.flush();
+      await tickTimers(t, 0);
+      if (phase === "closing") await tickTimers(t, NINE_MINUTES_MS);
+      reply.dispose();
+      acceptRequest();
+      await sending;
+      await tickTimers(t, NINE_MINUTES_MS * 2);
+      assert.equal(streams.length, phase === "closing" ? 2 : 1);
+      await assert.rejects(reply.write("Late"), /finished QQ reply/);
+      await reply.finish();
+      assert.ok(streams.every(({ text }) => !text.includes("🔚")));
+    });
+  }
+});
+
+test("finishing clears the rotation deadline while the final request is still in flight", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: 0 });
+  let acceptFinal!: () => void;
+  const finalResponse = new Promise<void>((resolve) => { acceptFinal = resolve; });
+  const { sender, streams } = senderFixture({}, async (input) => {
+    if (input.state === 10) await finalResponse;
+    return { id: "stream" };
+  });
+  const reply = sender.createReply(inboundMessage());
+  await reply.write("Complete");
+  await reply.flush();
+  const finishing = reply.finish();
+  await tickTimers(t, 0);
+  await tickTimers(t, NINE_MINUTES_MS);
+  assert.equal(streams.length, 2);
+  acceptFinal();
+  await finishing;
+  await tickTimers(t, NINE_MINUTES_MS);
+  assert.deepEqual(streams.map(({ state }) => state), [1, 10]);
+  assert.equal(streams[1]!.text, "Complete\n\n🔚");
+});
+
+test("non-streaming replies and final-only plain rendering do not start rotation timers", async (t) => {
+  for (const chatType of ["direct", "group", "channel"] as const) {
+    for (const streamResponses of [false, true]) {
+      await t.test(`${chatType}: streaming=${streamResponses}`, async (t) => {
+        t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: 0 });
+        const { sender, streams, sent } = senderFixture({
+          streamResponses,
+          markdownMode: "plain",
+        });
+        const reply = sender.createReply(inboundMessage(chatType));
+        await reply.write("**Complete**");
+        await tickTimers(t, NINE_MINUTES_MS * 2);
+        assert.equal(streams.length, 0);
+        assert.equal(sent.length, 0);
+        await reply.finish();
+        await tickTimers(t, NINE_MINUTES_MS * 2);
+        if (chatType === "direct" && streamResponses) {
+          assert.deepEqual(streams.map(({ text }) => text), ["Complete", "Complete\n\n🔚"]);
+        } else {
+          assert.equal(streams.length, 0);
+          assert.deepEqual(sent.map(({ text }) => text), ["Complete"]);
+        }
+      });
+    }
+  }
+});
+
+test("interrupted streaming diagnostics dispose their stream timers", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: 0 });
+  const { sender, streams } = senderFixture();
+  await assert.rejects(sender.runStreamingDiagnostic(inboundMessage(), async () => {
+    throw new Error("Diagnostic interrupted");
+  }), /Diagnostic interrupted/);
+  await tickTimers(t, NINE_MINUTES_MS * 2);
+  assert.equal(streams.length, 1);
+});
+
 test("direct streaming preserves Markdown and LaTeX across ACP delta boundaries", async () => {
   const { sender, streams } = senderFixture();
   const reply = sender.createReply(inboundMessage());
@@ -478,38 +800,42 @@ test("group fallback batching splits lists only between top-level items", async 
   assert.deepEqual(sent.map(({ sequence }) => sequence), [1, 2]);
 });
 
-test("complete replies retain passive reply limits with streaming enabled", async () => {
+test("complete replies retain group/channel limits but do not cap direct replies at four", async () => {
   for (const chatType of ["direct", "group", "channel"] as const) {
     const { sender, sent, streams } = senderFixture({ textChunkLimit: 100 });
 
     await sender.reply(inboundMessage(chatType), "x".repeat(650));
 
-    const maximum = chatType === "direct" ? 4 : 5;
+    const maximum = chatType === "direct" ? 7 : 5;
     assert.equal(sent.length, maximum);
     assert.deepEqual(
       sent.map(({ sequence }) => sequence),
       Array.from({ length: maximum }, (_, index) => index + 1),
     );
-    assert.match(sent.at(-1)!.text, /Response truncated/);
+    if (chatType === "direct") {
+      assert.equal(sent.map(({ text }) => text).join(""), "x".repeat(650));
+    } else {
+      assert.match(sent.at(-1)!.text, /Response truncated/);
+    }
     assert.ok(sent.every(({ text }) => text.length <= 100));
     assert.equal(streams.length, 0);
   }
 });
 
-test("non-streaming direct fallback uses the official four-reply limit", async () => {
+test("non-streaming direct replies allow twenty chunks without an invented local quota", async () => {
   const { sender, sent } = senderFixture({
     textChunkLimit: 100,
     streamResponses: false,
   });
 
   const reply = sender.createReply(inboundMessage());
-  await reply.write("x".repeat(650));
+  await reply.write("x".repeat(2_000));
   assert.equal(sent.length, 0);
   await reply.finish();
 
-  assert.equal(sent.length, 4);
-  assert.deepEqual(sent.map((message) => message.sequence), [1, 2, 3, 4]);
-  assert.match(sent[3]!.text, /Response truncated/);
+  assert.equal(sent.length, 20);
+  assert.deepEqual(sent.map(({ sequence }) => sequence), Array.from({ length: 20 }, (_, index) => index + 1));
+  assert.equal(sent.map(({ text }) => text).join(""), "x".repeat(2_000));
 });
 
 test("truncation keeps the final native fenced-code chunk valid", async () => {
@@ -944,7 +1270,7 @@ function senderFixture(
         return streamResponse
           ? streamResponse(input)
           : {
-              id: `stream-${input.replyToId}`,
+              id: `stream-${input.replyToId}${input.sequence === 1 ? "" : `-${input.sequence}`}`,
               pendingCharacters: 0,
             };
       },
@@ -1022,4 +1348,9 @@ function inboundMessage(
 
 function waitForStreamUpdate(): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, 350));
+}
+
+async function tickTimers(t: TestContext, milliseconds: number): Promise<void> {
+  t.mock.timers.tick(milliseconds);
+  await new Promise<void>((resolve) => setImmediate(resolve));
 }
