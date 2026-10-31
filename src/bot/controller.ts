@@ -87,25 +87,29 @@ export class BotController {
     const reply = this.sender.createReply(message);
     let thoughtStarted = false;
     let answerStarted = false;
-    await this.sessions.prompt(message.conversationId, prompt, {
-      onText: async (text) => {
-        if (thoughtStarted && !answerStarted) {
-          answerStarted = true;
-          await reply.write("\n\n## Answer\n\n");
-        }
-        await reply.write(text);
-      },
-      onThought: async (text) => {
-        if (!thoughtStarted) {
-          thoughtStarted = true;
-          await reply.write("## Thought\n\n");
-        }
-        await reply.write(text);
-      },
-      onArtifact: (artifact, caption) =>
-        reply.sendArtifact(artifact, caption),
-      onComplete: () => reply.finish(),
-    });
+    try {
+      await this.sessions.prompt(message.conversationId, prompt, {
+        onText: async (text) => {
+          if (thoughtStarted && !answerStarted) {
+            answerStarted = true;
+            await reply.write("\n\n## Answer\n\n");
+          }
+          await reply.write(text);
+        },
+        onThought: async (text) => {
+          if (!thoughtStarted) {
+            thoughtStarted = true;
+            await reply.write("## Thought\n\n");
+          }
+          await reply.write(text);
+        },
+        onArtifact: (artifact, caption) =>
+          reply.sendArtifact(artifact, caption),
+        onComplete: () => reply.finish(),
+      });
+    } finally {
+      reply.dispose();
+    }
   }
 
   private async handleGlobalConfig(

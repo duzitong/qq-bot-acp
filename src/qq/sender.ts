@@ -21,7 +21,6 @@ import {
 } from "./format.js";
 import type { QQInboundMessage } from "./types.js";
 
-const DIRECT_MAX_PASSIVE_REPLIES = 4;
 const GROUP_MAX_PASSIVE_REPLIES = 5;
 const CHANNEL_MAX_PASSIVE_REPLIES = 5;
 const PROGRESSIVE_REPLY_LIMIT = 2;
@@ -29,9 +28,11 @@ const FINAL_REPLY_RESERVE = 1;
 const MAX_ARTIFACTS_PER_TURN = 2;
 const STREAM_LENGTH_MARGIN = 64;
 const STREAM_UPDATE_INTERVAL_MS = 300;
+const STREAM_ROTATION_INTERVAL_MS = 9 * 60_000;
 const STREAM_DIAGNOSTIC_INTERVAL_MS = 1_000;
 const STREAM_EMPTY_PLACEHOLDER = "…";
 const STREAM_COMPLETION_MARKER = "\n\n🔚";
+const STREAM_CONTINUATION_MARKER = "\n\n⏩";
 const TRUNCATION_NOTICE =
   "Response truncated: QQ's passive reply limit was reached.";
 let nextStreamTrace = 1;
@@ -53,6 +54,7 @@ export interface QQReplyStream {
     caption?: string,
   ): Promise<{ alreadySent: boolean }>;
   finish(): Promise<void>;
+  dispose(): void;
 }
 
 export class QQSender {
@@ -104,12 +106,16 @@ export class QQSender {
       "\n\n2. Second generating frame accepted after one second.",
       "\n\n3. Third generating frame accepted after another second.",
     ];
-    for (const delta of deltas) {
-      await reply.write(delta);
-      await reply.flush();
-      await pause(STREAM_DIAGNOSTIC_INTERVAL_MS);
+    try {
+      for (const delta of deltas) {
+        await reply.write(delta);
+        await reply.flush();
+        await pause(STREAM_DIAGNOSTIC_INTERVAL_MS);
+      }
+      await reply.finish();
+    } finally {
+      reply.dispose();
     }
-    await reply.finish();
   }
 }
 
@@ -124,7 +130,9 @@ class BufferedQQReply implements QQReplyStream {
   private streamSequence?: number;
   private streamIndex = 0;
   private streamLastText = "";
+  private streamHasPlaceholder = false;
   private streamTimer?: ReturnType<typeof setTimeout>;
+  private streamRotationTimer?: ReturnType<typeof setTimeout>;
   private streamError?: unknown;
   private readonly streamTrace = nextStreamTrace++;
 
@@ -152,6 +160,12 @@ class BufferedQQReply implements QQReplyStream {
 
   finish(): Promise<void> {
     return this.enqueue(() => this.finishNow());
+  }
+
+  dispose(): void {
+    this.finished = true;
+    this.clearStreamTimer();
+    this.clearStreamRotationTimer();
   }
 
   private async writeNow(text: string): Promise<void> {
@@ -224,6 +238,7 @@ class BufferedQQReply implements QQReplyStream {
   private async finishNow(): Promise<void> {
     if (this.finished) return;
     this.clearStreamTimer();
+    this.clearStreamRotationTimer();
     if (this.streamError !== undefined) throw this.streamError;
 
     if (this.usesOfficialStream()) {
@@ -286,7 +301,7 @@ class BufferedQQReply implements QQReplyStream {
     this.streamTimer = setTimeout(() => {
       this.streamTimer = undefined;
       void this.enqueue(() => this.flushStreamUpdate()).catch((error) => {
-        this.streamError = error;
+        this.stopStreamOnError(error);
       });
     }, STREAM_UPDATE_INTERVAL_MS);
     this.streamTimer.unref();
@@ -297,7 +312,30 @@ class BufferedQQReply implements QQReplyStream {
     this.streamTimer = undefined;
   }
 
+  private scheduleStreamRotation(): void {
+    if (this.finished) return;
+    this.streamRotationTimer = setTimeout(() => {
+      this.streamRotationTimer = undefined;
+      void this.enqueue(() => this.rotateOfficialStream()).catch((error) => {
+        this.stopStreamOnError(error);
+      });
+    }, STREAM_ROTATION_INTERVAL_MS);
+    this.streamRotationTimer.unref();
+  }
+
+  private clearStreamRotationTimer(): void {
+    if (this.streamRotationTimer) clearTimeout(this.streamRotationTimer);
+    this.streamRotationTimer = undefined;
+  }
+
+  private stopStreamOnError(error: unknown): void {
+    this.streamError = error;
+    this.clearStreamTimer();
+    this.clearStreamRotationTimer();
+  }
+
   private async flushStreamUpdate(): Promise<void> {
+    if (this.finished) return;
     if (this.streamError !== undefined) throw this.streamError;
     const desired = this.renderStreamText();
     if (!desired || desired === this.streamLastText) return;
@@ -306,11 +344,33 @@ class BufferedQQReply implements QQReplyStream {
     await this.sendStreamFrame(desired, 1);
   }
 
+  private async rotateOfficialStream(): Promise<void> {
+    if (this.finished || this.streamMessageId === undefined) return;
+    if (this.streamError !== undefined) throw this.streamError;
+    this.clearStreamTimer();
+
+    const source = streamSafeSource(this.buffer);
+    const desired = this.renderStreamText();
+    this.assertStreamPrefix(desired);
+    await this.sendStreamFrame(`${desired}${STREAM_CONTINUATION_MARKER}`, 10);
+    if (this.finished) return;
+
+    // Keep incomplete Markdown/LaTeX in source form for the next stream.
+    this.buffer = this.buffer.slice(source.length);
+    this.streamMessageId = undefined;
+    this.streamSequence = undefined;
+    this.streamIndex = 0;
+    this.streamLastText = "";
+    this.streamHasPlaceholder = true;
+    await this.sendStreamFrame(STREAM_EMPTY_PLACEHOLDER, 1);
+  }
+
   private async finishOfficialStream(): Promise<void> {
     let desired = this.renderStreamText(true);
     if (this.streamMessageId === undefined) {
       desired ||= STREAM_EMPTY_PLACEHOLDER;
       await this.sendStreamFrame(desired, 1);
+      if (this.finished) return;
     }
     this.assertStreamPrefix(desired);
     await this.sendStreamFrame(`${desired}${STREAM_COMPLETION_MARKER}`, 10);
@@ -319,7 +379,10 @@ class BufferedQQReply implements QQReplyStream {
   private renderStreamText(final = false): string {
     if (!final && this.effectiveMarkdownMode() === "plain") return "";
     const source = final ? this.buffer : streamSafeSource(this.buffer);
-    return this.render(source);
+    const text = this.render(source);
+    return this.streamHasPlaceholder
+      ? `${STREAM_EMPTY_PLACEHOLDER}${text ? `\n\n${text}` : ""}`
+      : text;
   }
 
   private assertStreamPrefix(desired: string): void {
@@ -335,8 +398,13 @@ class BufferedQQReply implements QQReplyStream {
       this.streamSequence = this.allocateSequence();
     }
     const frameIndex = this.streamIndex;
+    if (state === 10) {
+      this.clearStreamRotationTimer();
+    } else if (this.streamMessageId === undefined) {
+      this.scheduleStreamRotation();
+    }
     this.log(
-      `QQ stream frame sending trace=${this.streamTrace} index=${frameIndex} state=${state} chars=${countCharacters(text)}`,
+      `QQ stream frame sending trace=${this.streamTrace} sequence=${this.streamSequence} index=${frameIndex} state=${state} chars=${countCharacters(text)}`,
     );
     let response: QQStreamMessageResponse;
     try {
@@ -351,25 +419,26 @@ class BufferedQQReply implements QQReplyStream {
           this.effectiveMarkdownMode() === "native" ? "markdown" : "text",
         streamMessageId: this.streamMessageId,
       });
+      if (
+        this.streamMessageId !== undefined &&
+        response.id !== this.streamMessageId
+      ) {
+        throw new Error(
+          `QQ stream message ID changed from ${this.streamMessageId} to ${response.id}`,
+        );
+      }
     } catch (error) {
+      this.stopStreamOnError(error);
       this.log(
-        `QQ stream frame failed trace=${this.streamTrace} index=${frameIndex} state=${state} error=${streamErrorCategory(error)}`,
+        `QQ stream frame failed trace=${this.streamTrace} sequence=${this.streamSequence} index=${frameIndex} state=${state} error=${streamErrorCategory(error)}`,
       );
       throw error;
-    }
-    if (
-      this.streamMessageId !== undefined &&
-      response.id !== this.streamMessageId
-    ) {
-      throw new Error(
-        `QQ stream message ID changed from ${this.streamMessageId} to ${response.id}`,
-      );
     }
     this.streamMessageId ??= response.id;
     this.streamIndex++;
     this.streamLastText = text;
     this.log(
-      `QQ stream frame accepted trace=${this.streamTrace} index=${frameIndex} state=${state} chars=${countCharacters(text)} pending=${response.pendingCharacters ?? "unknown"}`,
+      `QQ stream frame accepted trace=${this.streamTrace} sequence=${this.streamSequence} index=${frameIndex} state=${state} chars=${countCharacters(text)} pending=${response.pendingCharacters ?? "unknown"}`,
     );
   }
 
@@ -426,7 +495,7 @@ class BufferedQQReply implements QQReplyStream {
   private maxPassiveReplies(): number {
     switch (this.message.chatType) {
       case "direct":
-        return DIRECT_MAX_PASSIVE_REPLIES;
+        return Number.POSITIVE_INFINITY;
       case "group":
         return GROUP_MAX_PASSIVE_REPLIES;
       case "channel":

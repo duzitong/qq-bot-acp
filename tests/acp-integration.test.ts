@@ -135,3 +135,69 @@ test("per-conversation manager exchanges prompts with an ACP child process", asy
     await fs.rm(temp, { recursive: true, force: true });
   }
 });
+
+test("controller disposes reply timers when an ACP turn exits without onComplete", async (t) => {
+  for (const failed of [false, true]) {
+    await t.test(failed ? "prompt rejected" : "prompt returned", async (t) => {
+      t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: 0 });
+      const config = createInitialConfig({
+        appId: "unused",
+        clientSecretFile: "/unused/secret",
+        agentCommand: "unused",
+      });
+      config.access.admins = ["user"];
+      const manager = new SessionManager(
+        config,
+        new SessionStateStore("/unused/sessions.json"),
+        new ArtifactBroker(() => {}),
+        () => {},
+      );
+      const streams: QQSendStreamInput[] = [];
+      const sender = new QQSender({
+        sendText: async () => { throw new Error("Unexpected text reply"); },
+        sendStream: async (input) => {
+          streams.push(input);
+          return { id: "stream" };
+        },
+        uploadMedia: async () => { throw new Error("Unexpected media upload"); },
+        sendMedia: async () => { throw new Error("Unexpected media reply"); },
+      }, () => config);
+      const controller = new BotController(
+        config,
+        new ConfigStore(resolveBotPaths(undefined, "/unused")),
+        manager,
+        sender,
+        () => {},
+      );
+      const prompt: SessionManager["prompt"] = async (_key, _prompt, callbacks) => {
+        await callbacks.onText("Partial response");
+        t.mock.timers.tick(300);
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        assert.equal(streams.length, 1);
+        if (failed) throw new Error("ACP prompt interrupted");
+      };
+      t.mock.method(manager, "prompt", prompt);
+
+      const handling = controller.handleMessage({
+        accountId: "unused",
+        conversationId: "conversation",
+        chatType: "direct",
+        senderId: "user",
+        targetId: "user",
+        messageId: "inbound",
+        timestamp: "2026-10-31T00:00:00Z",
+        text: "hello",
+        attachments: [],
+      });
+      if (failed) {
+        await assert.rejects(handling, /ACP prompt interrupted/);
+      } else {
+        await handling;
+      }
+      t.mock.timers.tick(18 * 60_000);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      assert.equal(streams.length, 1);
+      assert.equal(streams[0]!.state, 1);
+    });
+  }
+});
